@@ -112,6 +112,7 @@ near_term:
 # ---------------------------------------------------------------------------
 stats:
   snowfall_days:
+    short: "measurable snowfall (≥ 0.25 cm / 0.1 in)"
     label: Days with measurable snowfall (≥ 0.25 cm / 0.1 in)
     variable: snowfall_cm
     op: ge
@@ -121,6 +122,7 @@ stats:
       - {label: "Measurable (≥ 0.25 cm / 0.1 in)", op: ge, threshold: 0.25}
       - {label: "≥ 2.5 cm (1 in)",                 op: ge, threshold: 2.5}
   heavy_snow_days:
+    short: "heavy snowfall (≥ 10 cm / 4 in)"
     label: Days with heavy snowfall (≥ 10 cm / 4 in)
     variable: snowfall_cm
     op: ge
@@ -130,6 +132,7 @@ stats:
       - {label: "≥ 10 cm (4 in)",  op: ge, threshold: 10}
       - {label: "≥ 15 cm (6 in)",  op: ge, threshold: 15}
   freezing_days:
+    short: "a minimum temperature at or below 0 °C (32 °F)"
     label: Days with minimum temperature ≤ 0 °C (32 °F)
     variable: tmin_c
     op: le
@@ -139,6 +142,7 @@ stats:
       - {label: "Tmin ≤ −10 °C", op: le, threshold: -10}
       - {label: "Tmin ≤ −18 °C", op: le, threshold: -18}
   extreme_cold_days:
+    short: "a minimum temperature at or below −18 °C (0 °F)"
     label: Days with minimum temperature ≤ −18 °C (0 °F)
     variable: tmin_c
     op: le
@@ -148,6 +152,7 @@ stats:
       - {label: "Tmin ≤ −18 °C", op: le, threshold: -18}
       - {label: "Tmin ≤ −25 °C", op: le, threshold: -25}
   rain_days:
+    short: "at least 1 mm of precipitation"
     label: Days with precipitation ≥ 1 mm
     variable: precip_mm
     op: ge
@@ -157,6 +162,7 @@ stats:
       - {label: "≥ 1 mm",   op: ge, threshold: 1}
       - {label: "≥ 10 mm",  op: ge, threshold: 10}
   heavy_rain_days:
+    short: "heavy rain (≥ 50 mm / 2 in)"
     label: Days with precipitation ≥ 50 mm (2 in)
     variable: precip_mm
     op: ge
@@ -166,6 +172,7 @@ stats:
       - {label: "≥ 50 mm", op: ge, threshold: 50}
       - {label: "≥ 100 mm", op: ge, threshold: 100}
   hot_days:
+    short: "a maximum temperature at or above 35 °C (95 °F)"
     label: Days with maximum temperature ≥ 35 °C (95 °F)
     variable: tmax_c
     op: ge
@@ -175,6 +182,7 @@ stats:
       - {label: "Tmax ≥ 35 °C", op: ge, threshold: 35}
       - {label: "Tmax ≥ 38 °C", op: ge, threshold: 38}
   windy_days:
+    short: "gusts of 75 km/h (47 mph) or more"
     label: Days with gusts ≥ 75 km/h (47 mph)
     variable: gust_kmh
     op: ge

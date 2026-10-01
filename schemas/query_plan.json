@@ -1,0 +1,297 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "intent": {
+      "description": "rank hubs, compare hubs, stat (% of days), explain one hub's score, outlook (next 7 days), clarify, or out_of_scope",
+      "enum": [
+        "rank",
+        "compare",
+        "stat",
+        "explain",
+        "outlook",
+        "clarify",
+        "out_of_scope"
+      ],
+      "type": "string"
+    },
+    "hubs": {
+      "anyOf": [
+        {
+          "items": {
+            "enum": [
+              "chicago",
+              "indianapolis",
+              "columbus",
+              "detroit",
+              "minneapolis",
+              "kansas_city",
+              "st_louis",
+              "denver",
+              "dallas",
+              "houston",
+              "miami",
+              "atlanta",
+              "memphis",
+              "newark",
+              "los_angeles"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Explicit hubs, or null to use region / all hubs"
+    },
+    "region": {
+      "anyOf": [
+        {
+          "enum": [
+            "midwest",
+            "south",
+            "west",
+            "northeast"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "US Census region filter, or null"
+    },
+    "hazards": {
+      "anyOf": [
+        {
+          "items": {
+            "enum": [
+              "winter",
+              "hurricane",
+              "flood",
+              "severe_storm",
+              "heat"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Hazard families to focus on, or null for all"
+    },
+    "horizon": {
+      "description": "long_term exposure (investment) or next_7_days (near-term risk)",
+      "enum": [
+        "long_term",
+        "next_7_days"
+      ],
+      "type": "string"
+    },
+    "metric": {
+      "anyOf": [
+        {
+          "enum": [
+            "snowfall_days",
+            "heavy_snow_days",
+            "freezing_days",
+            "extreme_cold_days",
+            "rain_days",
+            "heavy_rain_days",
+            "hot_days",
+            "windy_days"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "For intent=stat: which day count"
+    },
+    "top_k": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "How many ranked hubs to show, or null for all"
+    },
+    "time_preset": {
+      "anyOf": [
+        {
+          "enum": [
+            "last_calendar_year",
+            "trailing_12_months",
+            "last_winter",
+            "year_to_date",
+            "specific_year",
+            "custom"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "For intent=stat: which window"
+    },
+    "year": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Only with time_preset=specific_year"
+    },
+    "start_date": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Only with time_preset=custom, YYYY-MM-DD"
+    },
+    "end_date": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Only with time_preset=custom, YYYY-MM-DD"
+    },
+    "weight_overrides": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "winter": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "hurricane": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "flood": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "severe_storm": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "heat": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "winter",
+            "hurricane",
+            "flood",
+            "severe_storm",
+            "heat"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Relative hazard weights the user asked for, else null"
+    },
+    "interpretation_notes": {
+      "description": "How ambiguous wording was read, e.g. 'last year = calendar 2025'",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "clarification_question": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "For intent=clarify"
+    },
+    "out_of_scope_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "For intent=out_of_scope"
+    }
+  },
+  "required": [
+    "intent",
+    "hubs",
+    "region",
+    "hazards",
+    "horizon",
+    "metric",
+    "top_k",
+    "time_preset",
+    "year",
+    "start_date",
+    "end_date",
+    "weight_overrides",
+    "interpretation_notes",
+    "clarification_question",
+    "out_of_scope_reason"
+  ],
+  "type": "object"
+}

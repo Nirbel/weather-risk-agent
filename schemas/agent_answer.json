@@ -1,0 +1,222 @@
+{
+  "$defs": {
+    "Source": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "retrieved_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retrieved At"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        }
+      },
+      "required": [
+        "name",
+        "url"
+      ],
+      "title": "Source",
+      "type": "object"
+    },
+    "TimeWindow": {
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "title": "TimeWindow",
+      "type": "object"
+    },
+    "Uncertainty": {
+      "properties": {
+        "level": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        }
+      },
+      "required": [
+        "level",
+        "reasons"
+      ],
+      "title": "Uncertainty",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "conversation_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Conversation Id"
+    },
+    "intent": {
+      "title": "Intent",
+      "type": "string"
+    },
+    "answer": {
+      "title": "Answer",
+      "type": "string"
+    },
+    "reasoning": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reasoning",
+      "type": "array"
+    },
+    "suggested_follow_ups": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Suggested Follow Ups",
+      "type": "array"
+    },
+    "table": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Table",
+      "type": "array"
+    },
+    "breakdown": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Breakdown"
+    },
+    "assumptions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Assumptions",
+      "type": "array"
+    },
+    "uncertainty": {
+      "$ref": "#/$defs/Uncertainty"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/Source"
+      },
+      "title": "Sources",
+      "type": "array"
+    },
+    "time_windows": {
+      "items": {
+        "$ref": "#/$defs/TimeWindow"
+      },
+      "title": "Time Windows",
+      "type": "array"
+    },
+    "query_plan": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Query Plan"
+    },
+    "meta": {
+      "additionalProperties": true,
+      "title": "Meta",
+      "type": "object"
+    }
+  },
+  "required": [
+    "intent",
+    "answer",
+    "reasoning",
+    "suggested_follow_ups",
+    "table",
+    "breakdown",
+    "assumptions",
+    "uncertainty",
+    "sources",
+    "time_windows",
+    "query_plan",
+    "meta"
+  ],
+  "title": "AgentAnswer",
+  "type": "object"
+}

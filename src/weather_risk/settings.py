@@ -1,5 +1,6 @@
 """Runtime settings, read from environment variables and `.env`."""
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -19,7 +20,9 @@ class Settings(BaseSettings):
     # Data sources (NWS asks for a contact in the User-Agent)
     contact_email: str = "weather-risk-agent@example.com"
 
-    # LLM (via LiteLLM)
+    # LLM (via LiteLLM, which reads provider keys from the environment)
+    groq_api_key: str | None = None
+    gemini_api_key: str | None = None
     llm_model: str = "groq/openai/gpt-oss-20b"
     llm_fallback_model: str = "gemini/gemini-3.8-flash"
     llm_timeout_s: float = 30.0
@@ -42,4 +45,13 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    # .env values are read by pydantic-settings; LiteLLM looks for keys in os.environ.
+    for name, value in (("GROQ_API_KEY", settings.groq_api_key), ("GEMINI_API_KEY", settings.gemini_api_key)):
+        if value:
+            os.environ.setdefault(name, value)
+    return settings
+
+
+def llm_configured(settings: Settings) -> bool:
+    return bool(settings.groq_api_key or settings.gemini_api_key)
