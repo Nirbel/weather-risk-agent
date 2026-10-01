@@ -8,7 +8,7 @@ the app fetches on demand — but a cold first ranking takes ~3 minutes on Open-
 import argparse
 import asyncio
 
-import respx
+import httpx
 
 from weather_risk import replay
 from weather_risk.analysis import build_analyzer
@@ -24,19 +24,14 @@ async def main(use_replay: bool) -> None:
     settings = get_settings()
     db = Database("sqlite+aiosqlite:///:memory:" if use_replay else settings.database_url)
     await db.create_all()
-    router = respx.mock(assert_all_called=False)
-    if use_replay:
-        router.start()
-        replay.install(router)
     today = replay.recorded_today() if use_replay else None
+    client = httpx.AsyncClient(transport=replay.transport()) if use_replay else make_client(settings.contact_email)
     try:
-        async with make_client(settings.contact_email) as client:
+        async with client:
             analyzer = (build_analyzer(db, client, today_fn=lambda: today, limiter=RateLimiter(float("inf")))
                         if use_replay else build_analyzer(db, client))
             result = await analyzer.exposure()
     finally:
-        if use_replay:
-            router.stop()
         await db.dispose()
 
     families = list(load_scoring_config().families)
