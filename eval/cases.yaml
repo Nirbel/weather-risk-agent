@@ -1,9 +1,10 @@
 # Evaluation set — built around the four example questions, plus follow-ups and guardrails.
 #
 # Each case: one or more turns (later turns are follow-ups in the same conversation).
-#   expect_plan: fields the planner must produce for that turn (live mode compares them;
+#   expect_plan: fields the planner must produce for that turn (live/online modes compare them;
 #                offline mode feeds a plan built from them to the executor).
 #                `intent` may be a list of acceptable intents (first = the one used offline).
+#                `year: {years_ago: N}` means today's year − N, so cases do not go stale.
 #   checks:      applied to the final turn's answer.
 #
 # Check types:
@@ -18,6 +19,10 @@
 #   assumption_mentions   substring of an assumption
 #   stat_matches_raw      % of days recomputed from the raw recorded Open-Meteo JSON
 #   not_contains          substrings that must not appear in the answer text
+#
+# Online mode (--online) uses live public data, so it skips the checks that assume recorded values
+# (top_hub, order, stat_matches_raw, uncertainty_mentions, headline_contains). Instead it compares
+# every answer with the deterministic result the code produces in the same run (eval/online.py).
 
 - id: A1
   group: Midwest winter
@@ -107,7 +112,7 @@
     - question: What percentage of days in Denver last year had snowfall?
       expect_plan: {intent: stat, hubs: [denver], metric: snowfall_days, time_preset: last_calendar_year}
     - question: And the year before?
-      expect_plan: {intent: stat, hubs: [denver], metric: snowfall_days, time_preset: specific_year, year: 2024}
+      expect_plan: {intent: stat, hubs: [denver], metric: snowfall_days, time_preset: specific_year, year: {years_ago: 2}}
   checks: {contract: true, stat_matches_raw: {hub: denver, years: [2024], threshold: 0.25}}
 
 - id: C3

@@ -2,10 +2,12 @@
 
     uv run python -m eval.run              # offline: replayed real data, expected plans, template explainer
     uv run python -m eval.run --live       # real planner + explainer (Groq → Gemini) on the same replayed data
+    uv run python -m eval.run --online     # end to end: real LLM + real Open-Meteo / FEMA APIs (eval/online.py)
     uv run python -m eval.run --only A1,C1 # a subset
 
-Data is always the recorded real API responses (tests/fixtures/recorded), served "as of" the
-recording date, so expected numbers are stable. Exit code is non-zero if any case fails.
+Offline and --live use the recorded real API responses (tests/fixtures/recorded), served "as of"
+the recording date, so expected numbers are stable. --online uses today's live data and checks
+answers against the code's own result from the same run. Exit code is non-zero if any case fails.
 """
 
 import argparse
@@ -35,8 +37,20 @@ PLAN_FIELDS = ("intent", "hubs", "region", "hazards", "metric", "time_preset", "
 
 # -- plans -------------------------------------------------------------------------
 
+def load_cases() -> list[dict]:
+    return yaml.safe_load((ROOT / "eval" / "cases.yaml").read_text())
+
+
+def resolve_expected(expected: dict, today) -> dict:
+    """`year: {years_ago: N}` → today's year − N, so date-relative cases stay correct."""
+    out = dict(expected)
+    if isinstance(out.get("year"), dict):
+        out["year"] = today.year - out["year"]["years_ago"]
+    return out
+
+
 def build_plan(expected: dict) -> QueryPlan:
-    """Offline: turn a case's expected plan fields into a full QueryPlan."""
+    """Turn a case's expected plan fields into a full QueryPlan (offline mode, online reference)."""
     intent = expected["intent"][0] if isinstance(expected["intent"], list) else expected["intent"]
     data = {f: None for f in QueryPlan.model_fields} | {"interpretation_notes": []}
     data |= {k: v for k, v in expected.items() if k != "intent"} | {"intent": intent}
@@ -130,14 +144,15 @@ async def run_case(case: dict, agent: Agent, live: bool) -> dict:
     plan_notes: list[str] = []
     conversation_id, answer = None, None
     for turn in case["turns"]:
+        expected = resolve_expected(turn["expect_plan"], agent.analyzer.today)
         if live:
             result = await agent.ask(turn["question"], conversation_id, user_email="eval")
             answer = result.model_dump(mode="json")
             conversation_id = answer["conversation_id"]
-            ok, total, notes = plan_matches(turn["expect_plan"], answer["query_plan"])
+            ok, total, notes = plan_matches(expected, answer["query_plan"])
             plan_ok, plan_total, plan_notes = plan_ok + ok, plan_total + total, plan_notes + notes
         else:
-            result = await agent.answer_plan(build_plan(turn["expect_plan"]), turn["question"], use_llm=False)
+            result = await agent.answer_plan(build_plan(expected), turn["question"], use_llm=False)
             answer = result.model_dump(mode="json")
     failures = run_checks(case.get("checks", {}), answer)
     expected_intent = case["turns"][-1]["expect_plan"]["intent"]
@@ -160,7 +175,7 @@ async def main(live: bool, only: set[str] | None, pause: float) -> int:
     settings = get_settings()
     if live and not llm_configured(settings):
         raise SystemExit("--live needs GROQ_API_KEY and/or GEMINI_API_KEY in .env")
-    cases = [c for c in yaml.safe_load((ROOT / "eval" / "cases.yaml").read_text()) if not only or c["id"] in only]
+    cases = [c for c in load_cases() if not only or c["id"] in only]
     db = Database("sqlite+aiosqlite:///:memory:")
     await db.create_all()
     today = replay.recorded_today()
@@ -205,8 +220,18 @@ async def main(live: bool, only: set[str] | None, pause: float) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--live", action="store_true", help="use the real LLM planner and explainer")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--live", action="store_true", help="real LLM planner and explainer on recorded data")
+    mode.add_argument("--online", action="store_true", help="end to end: real LLM and real public APIs")
     parser.add_argument("--only", help="comma-separated case ids")
-    parser.add_argument("--pause", type=float, default=8.0, help="seconds between live cases (rate limits)")
+    parser.add_argument("--pause", type=float, help="seconds between LLM turns (rate limits; default 8 live, "
+                                                     "15 online)")
+    parser.add_argument("--cache", help="--online: SQLite file to keep downloaded data between runs "
+                                        "(default: a fresh temporary cache, so the APIs are really called)")
     args = parser.parse_args()
-    raise SystemExit(asyncio.run(main(args.live, set(args.only.split(",")) if args.only else None, args.pause)))
+    only = set(args.only.split(",")) if args.only else None
+    if args.online:
+        from eval import online
+
+        raise SystemExit(asyncio.run(online.main(only, 15.0 if args.pause is None else args.pause, args.cache)))
+    raise SystemExit(asyncio.run(main(args.live, only, 8.0 if args.pause is None else args.pause)))

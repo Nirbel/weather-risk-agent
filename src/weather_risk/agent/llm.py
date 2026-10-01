@@ -2,7 +2,8 @@
 
 Two separate failure paths (docs/DECISIONS.md D3, D5):
   - provider failure (5xx/timeout/auth, long rate limits) → try the next model in `models`;
-    a short rate limit (≤ 12 s, e.g. Groq's 8K tokens/min) is waited out once on the same model;
+    a short rate limit (≤ 12 s, e.g. Groq's 8K tokens/min) or a temporary overload (HTTP 503,
+    "high demand") is waited out once on the same model first;
   - invalid output (schema, a provider rejecting its own JSON, or the extra `check`)
     → one retry with the errors, then LLMValidationError.
 """
@@ -23,6 +24,8 @@ T = TypeVar("T", bound=BaseModel)
 GENERATION_REJECTED = ("json_validate_failed", "does not match the expected schema", "failed_generation")
 RETRY_AFTER = re.compile(r"try again in ([\d.]+)\s*s", re.IGNORECASE)
 MAX_RATE_LIMIT_WAIT_S = 12.0
+TRANSIENT = ("503", "ServiceUnavailable", "overloaded", "high demand")
+TRANSIENT_WAIT_S = 3.0
 
 
 class _GenerationRejected(ValueError):
@@ -89,6 +92,10 @@ async def _complete(completion: Callable[..., Awaitable[Any]], messages: list[di
                 if try_ == 1 and wait and float(wait.group(1)) <= MAX_RATE_LIMIT_WAIT_S:
                     meta.provider_errors.append(f"{model}: rate limited, waited {float(wait.group(1)):.1f}s")
                     await asyncio.sleep(float(wait.group(1)))
+                    continue
+                if try_ == 1 and any(marker in text for marker in TRANSIENT):
+                    meta.provider_errors.append(f"{model}: temporarily unavailable, waited {TRANSIENT_WAIT_S:g}s")
+                    await asyncio.sleep(TRANSIENT_WAIT_S)
                     continue
                 meta.provider_errors.append(f"{model}: {exc.__class__.__name__}: {text[:200]}")
                 break

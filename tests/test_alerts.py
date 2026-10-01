@@ -1,5 +1,6 @@
 """Score-change alerts: the pure diff (hand-computed), the alert run and webhook delivery (respx)."""
 
+import ipaddress
 import json
 from datetime import date
 
@@ -67,15 +68,32 @@ class ScoreAnalyzer:
 
 
 SETTINGS = Settings(alert_threshold=5.0)
+PUBLIC_IP = "93.184.215.14"
+
+
+def resolver(table: dict[str, list[str]] | None = None):
+    """Offline DNS: IP literals resolve to themselves, names in `table` as given, others to a public IP."""
+    async def resolve(host: str, port: int) -> list[str]:
+        if host in (table or {}):
+            return table[host]
+        try:
+            return [str(ipaddress.ip_address(host))]
+        except ValueError:
+            return [PUBLIC_IP]
+    return resolve
+
+
+def service(db, scores=None, *, gaps=None, client=None, settings=SETTINGS, resolve=None):
+    return AlertService(db, ScoreAnalyzer(scores or {}, gaps), settings, client, resolve=resolve or resolver())
 
 
 async def run(db, scores, *, gaps=None):
     async with httpx.AsyncClient() as client:
-        return await AlertService(db, ScoreAnalyzer(scores, gaps), SETTINGS, client).run()
+        return await service(db, scores, gaps=gaps, client=client).run()
 
 
-async def save(db, email, url=HOOK, *, enabled=True, threshold=5.0):
-    return await AlertService(db, ScoreAnalyzer({}), SETTINGS, None).update_settings(
+async def save(db, email, url=HOOK, *, enabled=True, threshold=5.0, settings=SETTINGS, resolve=None):
+    return await service(db, settings=settings, resolve=resolve).update_settings(
         email, webhook_url=url, enabled=enabled, threshold=threshold)
 
 
@@ -84,7 +102,7 @@ def outcome(result, email):
 
 
 async def test_unconfigured_user_gets_defaults(db):
-    cfg = await AlertService(db, ScoreAnalyzer({}), SETTINGS, None).config(ANA)
+    cfg = await service(db).config(ANA)
     assert (cfg["webhook_url"], cfg["enabled"], cfg["threshold"]) == (None, False, 5.0)
 
 
@@ -145,8 +163,8 @@ async def test_webhook_failure_is_recorded_not_raised(db):
 async def test_redirects_are_not_followed(db):
     await save(db, ANA)
     with respx.mock(assert_all_called=False) as router:
-        router.post(HOOK).respond(302, headers={"Location": "http://169.254.169.254/latest"})
-        elsewhere = router.post("http://169.254.169.254/latest").respond(200)
+        router.post(HOOK).respond(302, headers={"Location": "https://internal.example.com/admin"})
+        elsewhere = router.post("https://internal.example.com/admin").respond(200)
         await run(db, {"miami": 41.0})
         result = await run(db, {"miami": 30.0})
     assert outcome(result, ANA)["delivery"] == "failed: HTTP 302" and not elsewhere.called
@@ -187,11 +205,11 @@ async def test_send_test_posts_to_the_users_saved_url(db):
     with respx.mock() as router:
         hook = router.post(HOOK).respond(204)
         async with httpx.AsyncClient() as client:
-            ok = await AlertService(db, ScoreAnalyzer({}), SETTINGS, client).send_test(ANA)
+            ok = await service(db, client=client).send_test(ANA)
     assert ok == {"ok": True, "delivery": "sent"}
     assert json.loads(hook.calls.last.request.content)["event"] == "test"
     async with httpx.AsyncClient() as client:
-        missing = await AlertService(db, ScoreAnalyzer({}), SETTINGS, client).send_test(BEN)
+        missing = await service(db, client=client).send_test(BEN)
     assert missing == {"ok": False, "delivery": "no webhook URL set"}
 
 
@@ -212,3 +230,44 @@ async def test_any_http_endpoint_works_make_n8n_zapier_teams(db):
     for url in ("https://hook.eu1.make.com/abc", "http://n8n.local:5678/webhook/weather",
                 "https://hooks.zapier.com/hooks/catch/1/2/", "https://prod.westeurope.logic.azure.com/workflows/x"):
         assert (await save(db, ANA, url))["webhook_url"] == url
+
+
+# -- destination check (self-registered users choose the URL the server calls) -----------
+
+@pytest.mark.parametrize("url", ["http://169.254.169.254/latest/meta-data", "http://[fe80::1]/x", "http://0.0.0.0/x"])
+async def test_link_local_and_metadata_addresses_are_always_refused(db, url):
+    with pytest.raises(ValueError, match="link-local"):
+        await save(db, ANA, url, settings=Settings(allow_private_webhooks=True))
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:9009/hook", "http://10.0.0.7/hook", "http://[::1]/x",
+                                 "http://[::ffff:192.168.1.5]/x"])
+async def test_private_addresses_need_an_explicit_opt_in(db, url):
+    with pytest.raises(ValueError, match="ALLOW_PRIVATE_WEBHOOKS"):
+        await save(db, ANA, url)
+    assert (await save(db, ANA, url, settings=Settings(allow_private_webhooks=True)))["webhook_url"] == url
+
+
+async def test_a_name_that_resolves_to_an_internal_address_is_refused(db):
+    with pytest.raises(ValueError, match="private or loopback"):
+        await save(db, ANA, "https://n8n.corp.example/webhook", resolve=resolver({"n8n.corp.example": ["10.1.2.3"]}))
+
+
+async def test_an_unresolvable_host_is_refused(db):
+    async def nxdomain(host, port):
+        raise OSError("Name or service not known")
+
+    with pytest.raises(ValueError, match="cannot resolve"):
+        await save(db, ANA, "https://no-such-host.invalid/hook", resolve=nxdomain)
+
+
+async def test_delivery_rechecks_the_destination(db):
+    # The name resolved to a public address when saved, but to an internal one at send time (DNS rebinding).
+    await save(db, ANA)
+    rebound = resolver({"hooks.example.com": ["127.0.0.1"]})
+    with respx.mock(assert_all_called=False) as router:
+        hook = router.post(HOOK).respond(200)
+        async with httpx.AsyncClient() as client:
+            result = await service(db, client=client, resolve=rebound).send_test(ANA)
+    assert result["delivery"].startswith("blocked: 127.0.0.1") and not hook.called
+

@@ -41,11 +41,16 @@ class FakeTranscription:
         return SimpleNamespace(text=f"  {self.text} ")
 
 
+async def public_dns(host: str, port: int) -> list[str]:
+    return ["93.184.215.14"]  # offline: every webhook host resolves to a public address
+
+
 @pytest.fixture
 def make_client():
-    def factory(*outcomes, settings=SETTINGS, transcription=None, analyzer=None):
-        app = create_app(settings, db=Database("sqlite+aiosqlite:///:memory:"), analyzer=analyzer or FakeAnalyzer(),
-                         completion=FakeCompletion(*outcomes), transcription=transcription or FakeTranscription())
+    def factory(*outcomes, settings=SETTINGS, transcription=None, analyzer=None, db=None):
+        app = create_app(settings, db=db or Database("sqlite+aiosqlite:///:memory:"),
+                         analyzer=analyzer or FakeAnalyzer(), completion=FakeCompletion(*outcomes),
+                         transcription=transcription or FakeTranscription(), resolve=public_dns)
         return TestClient(app)
     return factory
 
@@ -131,12 +136,21 @@ def test_duplicate_signup_and_short_password_are_rejected(make_client):
 
 def test_passwords_are_stored_hashed(make_client):
     db = Database("sqlite+aiosqlite:///:memory:")
-    app = create_app(SETTINGS, db=db, analyzer=FakeAnalyzer(), completion=FakeCompletion())
-    with TestClient(app) as client:
+    with make_client(db=db) as client:
         client.post("/auth/signup", json={"email": ANA[0], "password": ANA[1]})
         stored = {email: client.portal.call(db.get_account, email)["password_hash"] for email in (ADMIN[0], ANA[0])}
     for email, password in (ADMIN, ANA):
         assert stored[email].startswith("scrypt$") and password not in stored[email]
+
+
+def test_demo_admin_password_follows_the_setting(make_client):
+    db = Database("sqlite+aiosqlite:///:memory:")
+    with make_client(db=db) as client:  # first start: created with 12345678
+        assert login(client, *ADMIN).status_code == 200
+    rotated = SETTINGS.model_copy(update={"demo_admin_password": "a-new-long-password"})
+    with make_client(db=db, settings=rotated) as client:  # restart with DEMO_ADMIN_PASSWORD changed
+        assert login(client, *ADMIN).status_code == 401
+        assert login(client, ADMIN[0], "a-new-long-password").json()["role"] == "admin"
 
 
 # -- auth: tokens and protected routes -------------------------------------------------

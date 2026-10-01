@@ -7,6 +7,7 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DEMO_PASSWORD = "12345678"  # demo admin password required by the task; override with DEMO_ADMIN_PASSWORD
 
 
 class Settings(BaseSettings):
@@ -29,7 +30,7 @@ class Settings(BaseSettings):
     # Auth: email + password; sign-up only for @moveo.co.il (always role analyst).
     # The demo admin is created on first start if missing.
     demo_admin_email: str = "admin@moveo.co.il"
-    demo_admin_password: str = "12345678"
+    demo_admin_password: str = DEFAULT_DEMO_PASSWORD  # the startup log warns while this default is in use
     jwt_secret: str | None = None  # empty or < 32 bytes → a random secret per start (users log in again)
     token_ttl_hours: int = 12
 
@@ -38,6 +39,7 @@ class Settings(BaseSettings):
     alert_check_hours: float = 24.0
     alert_threshold: float = 5.0  # default threshold: points on the 0–100 overall Exposure Score
     alert_trigger_secret: str | None = None  # header X-Alert-Secret for POST /alerts/run (external cron)
+    allow_private_webhooks: bool = False  # true: users may target private/loopback hosts (e.g. LAN n8n)
 
     # UI → API
     api_url: str = "http://localhost:8000"

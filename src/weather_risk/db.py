@@ -202,6 +202,12 @@ class Database:
             return False
         return True
 
+    async def set_password(self, email: str, password_hash: str) -> None:
+        async with self._tx() as s:
+            account = await s.get(Account, email)
+            if account is not None:
+                account.password_hash = password_hash
+
     # -- weather -------------------------------------------------------------------
     async def upsert_daily(self, hub_id: str, rows: list[DailyRow]) -> None:
         if not rows:

@@ -11,7 +11,10 @@ closes. See docs/DECISIONS.md D22.
 """
 
 import asyncio
+import ipaddress
 import logging
+import socket
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -60,15 +63,53 @@ def diff_scores(baseline: dict[str, float], current: dict[str, float | None],
 
 
 def validate_webhook_url(url: str) -> None:
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        parsed.port  # noqa: B018 — raises on a malformed port
+    except ValueError as exc:
+        raise ValueError("The webhook URL must be a valid http(s) URL.") from exc
     if (parsed.scheme not in ("http", "https") or not parsed.hostname or any(c.isspace() for c in url)
             or len(url) > 2000):
         raise ValueError("The webhook URL must be a valid http(s) URL.")
 
 
+Resolver = Callable[[str, int], Awaitable[list[str]]]
+
+
+async def resolve_host(host: str, port: int) -> list[str]:
+    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return sorted({info[4][0] for info in infos})
+
+
+def _address_problem(ip: str, allow_private: bool) -> str | None:
+    """Any signed-up user chooses the URL the server calls, so internal destinations are refused (SSRF)."""
+    addr = ipaddress.ip_address(ip.split("%")[0])
+    if addr.version == 6 and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    never = f"{ip} is a link-local, multicast or reserved address (e.g. cloud metadata), which is never allowed"
+    if addr.is_link_local or addr.is_multicast or addr.is_unspecified:
+        return never
+    if addr.is_private or addr.is_loopback:  # before is_reserved: ::1 is both loopback and reserved
+        return None if allow_private else (
+            f"{ip} is a private or loopback address; set ALLOW_PRIVATE_WEBHOOKS=true if this server "
+            "should call internal services such as a self-hosted n8n")
+    return never if addr.is_reserved else None
+
+
+async def destination_problem(url: str, allow_private: bool, resolve: Resolver) -> str | None:
+    parsed = urlparse(url)
+    try:
+        ips = await resolve(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except OSError:
+        return f"cannot resolve {parsed.hostname}"
+    return next((p for ip in ips if (p := _address_problem(ip, allow_private))), None) if ips else \
+        f"cannot resolve {parsed.hostname}"
+
+
 class AlertService:
-    def __init__(self, db: Database, analyzer, settings: Settings, client: httpx.AsyncClient | None):
-        self.db, self.analyzer, self.settings, self.client = db, analyzer, settings, client
+    def __init__(self, db: Database, analyzer, settings: Settings, client: httpx.AsyncClient | None,
+                 resolve: Resolver = resolve_host):
+        self.db, self.analyzer, self.settings, self.client, self.resolve = db, analyzer, settings, client, resolve
 
     async def config(self, email: str) -> dict:
         """The user's saved settings, else defaults (no URL, off, the default threshold)."""
@@ -81,6 +122,8 @@ class AlertService:
         webhook_url = (webhook_url or "").strip() or None
         if webhook_url:
             validate_webhook_url(webhook_url)
+            if problem := await destination_problem(webhook_url, self.settings.allow_private_webhooks, self.resolve):
+                raise ValueError(f"This webhook URL is not allowed: {problem}.")
         if not 0 < threshold <= 100:
             raise ValueError("The threshold must be between 0 and 100 points.")
         latest = await self.db.latest_snapshot()  # a new subscriber starts from the latest check
@@ -141,6 +184,9 @@ class AlertService:
             return "no webhook URL set"
         if not cfg["enabled"]:
             return "disabled"
+        # Re-check at send time: the name may resolve elsewhere now than when it was saved.
+        if problem := await destination_problem(cfg["webhook_url"], self.settings.allow_private_webhooks, self.resolve):
+            return f"blocked: {problem}"
         try:  # bounded wait, and never follow a redirect to somewhere the user did not enter
             response = await self.client.post(cfg["webhook_url"], json=payload, timeout=WEBHOOK_TIMEOUT_S,
                                               follow_redirects=False)

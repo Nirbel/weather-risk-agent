@@ -104,3 +104,22 @@ async def test_gemini_calls_omit_temperature():
     await structured_call(MSGS, Thing, models=MODELS, completion=fake, temperature=0.2)
     assert fake.calls[0]["temperature"] == 0.2
     assert "temperature" not in fake.calls[1]
+
+
+BUSY = RuntimeError('litellm.ServiceUnavailableError: GeminiException - {"error": {"code": 503, '
+                    '"message": "This model is currently experiencing high demand."}}')
+
+
+async def test_temporary_overload_is_retried_once_on_the_same_model(monkeypatch):
+    monkeypatch.setattr("weather_risk.agent.llm.TRANSIENT_WAIT_S", 0)
+    fake = FakeCompletion(BUSY, '{"name": "a", "size": 1}')
+    obj, meta = await structured_call(MSGS, Thing, models=MODELS[1:], completion=fake)
+    assert obj.size == 1 and meta.model == MODELS[1] and len(fake.calls) == 2
+    assert "temporarily unavailable" in meta.provider_errors[0]
+
+
+async def test_persistent_overload_moves_to_the_next_model(monkeypatch):
+    monkeypatch.setattr("weather_risk.agent.llm.TRANSIENT_WAIT_S", 0)
+    fake = FakeCompletion(BUSY, BUSY, '{"name": "b", "size": 2}')
+    _, meta = await structured_call(MSGS, Thing, models=MODELS, completion=fake)
+    assert meta.model == MODELS[1] and meta.fallback_used

@@ -17,11 +17,14 @@ class SourceError(Exception):
         self.message = message
 
 
-def make_client(contact_email: str, timeout: float = 30.0) -> httpx.AsyncClient:
+def make_client(contact_email: str, timeout: float = 30.0,
+                transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
+    """`transport` lets the online eval inject network failures; the app uses the default."""
     return httpx.AsyncClient(
         timeout=timeout,
         headers={"User-Agent": f"(weather-risk-agent, {contact_email})"},
         follow_redirects=True,
+        transport=transport,
     )
 
 

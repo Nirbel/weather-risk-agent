@@ -129,10 +129,16 @@ async def login(db: Database, email: str, password: str, settings: Settings) -> 
 
 
 async def ensure_demo_admin(db: Database, settings: Settings) -> None:
-    """Create the demo admin on first start (an existing account is left as it is)."""
-    if settings.demo_admin_email and settings.demo_admin_password:
-        await db.create_account(normalize_email(settings.demo_admin_email),
-                                hash_password(settings.demo_admin_password), role="admin")
+    """Create the demo admin on first start. Its configured password is authoritative, so changing
+    DEMO_ADMIN_PASSWORD and restarting rotates it. Sign-up can never create or claim this account."""
+    if not (settings.demo_admin_email and settings.demo_admin_password):
+        return
+    email = normalize_email(settings.demo_admin_email)
+    account = await db.get_account(email)
+    if account is None:
+        await db.create_account(email, hash_password(settings.demo_admin_password), role="admin")
+    elif not verify_password(settings.demo_admin_password, account["password_hash"]):
+        await db.set_password(email, hash_password(settings.demo_admin_password))
 
 
 async def current_user(request: Request, creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> User:

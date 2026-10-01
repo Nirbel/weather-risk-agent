@@ -22,7 +22,7 @@ from weather_risk.api.auth import (MAX_PASSWORD, User, current_user, ensure_demo
 from weather_risk.config import load_hubs, load_scoring_config, validate_config
 from weather_risk.db import Database
 from weather_risk.scoring.exposure import overall_score
-from weather_risk.settings import Settings, get_settings, llm_configured, voice_configured
+from weather_risk.settings import DEFAULT_DEMO_PASSWORD, Settings, get_settings, llm_configured, voice_configured
 from weather_risk.sources.http import make_client
 
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
@@ -67,8 +67,9 @@ def _explain_plan(hub_id: str) -> QueryPlan:
 
 
 def create_app(settings: Settings | None = None, *, db: Database | None = None, analyzer=None,
-               completion=None, transcription=None) -> FastAPI:
-    """App factory. Tests inject a database, a (fake) analyzer and fake LLM completion/transcription."""
+               completion=None, transcription=None, resolve=None) -> FastAPI:
+    """App factory. Tests inject a database, a (fake) analyzer, fake LLM completion/transcription
+    and a fake DNS resolver for webhook destination checks."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -81,10 +82,14 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
         app.state.db = db or Database(app.state.settings.database_url)
         await app.state.db.create_all()
         await ensure_demo_admin(app.state.db, app.state.settings)
+        if app.state.settings.demo_admin_password == DEFAULT_DEMO_PASSWORD:
+            log.warning("The demo admin %s uses the default password from the task — set DEMO_ADMIN_PASSWORD "
+                        "before exposing this server to others.", app.state.settings.demo_admin_email)
         client = make_client(app.state.settings.contact_email)
         app.state.analyzer = analyzer or build_analyzer(app.state.db, client)
         app.state.agent = Agent(app.state.db, app.state.analyzer, app.state.settings, completion=completion)
-        app.state.alerts = AlertService(app.state.db, app.state.analyzer, app.state.settings, client)
+        app.state.alerts = AlertService(app.state.db, app.state.analyzer, app.state.settings, client,
+                                        **({"resolve": resolve} if resolve else {}))
         scheduler = None
         if app.state.settings.scheduler_enabled:
             scheduler = asyncio.create_task(run_on_schedule(app.state.alerts, app.state.settings.alert_check_hours))
