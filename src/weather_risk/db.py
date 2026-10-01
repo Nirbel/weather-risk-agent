@@ -8,10 +8,12 @@ import asyncio
 import uuid
 from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, event, func, select
 from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
@@ -126,9 +128,17 @@ class AlertSettings(Base):
     updated_by: Mapped[str] = mapped_column(String)
 
 
+def ensure_sqlite_directory(url: str) -> None:
+    """Create the parent directory of a SQLite file (a fresh clone has no data/ directory)."""
+    parsed = make_url(url)
+    if parsed.get_backend_name() == "sqlite" and parsed.database and parsed.database != ":memory:":
+        Path(parsed.database).expanduser().parent.mkdir(parents=True, exist_ok=True)
+
+
 class Database:
     def __init__(self, url: str):
         memory = ":memory:" in url
+        ensure_sqlite_directory(url)
         self.engine = create_async_engine(
             url,
             connect_args={"check_same_thread": False},

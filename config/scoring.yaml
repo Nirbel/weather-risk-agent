@@ -7,6 +7,14 @@ climatology:
   # (2021–2025 when run in 2026). Fetched on demand from Open-Meteo and cached.
   years: 5
 
+coverage:
+  # A hub's weather data counts as complete only if BOTH hold for the window being scored:
+  # at least min_pct of the expected days have data, and no run of missing days is longer
+  # than max_gap_days. Otherwise its weather-based scores are not computed and it is not
+  # ranked — an incomplete record must not look as reliable as a complete one.
+  min_pct: 99
+  max_gap_days: 3
+
 # ---------------------------------------------------------------------------
 # Long-term Exposure Score (investment)
 # ---------------------------------------------------------------------------

@@ -136,6 +136,16 @@ def test_analytics_exposure_matches_the_scoring(make_client):
     assert top["families"]["flood"]["score"] == 75
 
 
+def test_analytics_never_scores_a_hub_with_incomplete_weather(make_client):
+    app = create_app(SETTINGS, db=Database("sqlite+aiosqlite:///:memory:"),
+                     analyzer=FakeAnalyzer(incomplete={"houston"}), completion=FakeCompletion())
+    with TestClient(app) as client:
+        hubs = {h["hub_id"]: h for h in client.get("/analytics/exposure", headers=auth(client)).json()["hubs"]}
+    assert hubs["houston"]["overall"] is None and hubs["houston"]["weather_complete"] is False
+    assert hubs["houston"]["families"]["flood"]["score"] is None  # flood uses observed weather
+    assert hubs["dallas"]["overall"] == pytest.approx(36.0) and hubs["dallas"]["weather_complete"] is True
+
+
 def test_analytics_hub_is_deterministic(make_client):
     with make_client() as client:  # FakeCompletion() has no outcomes: any LLM call would fail
         answer = client.get("/analytics/hubs/dallas", headers=auth(client)).json()
@@ -223,3 +233,14 @@ def test_transcribe_errors_are_clear(make_client):
         assert client.post("/transcribe", headers=auth(client),
                            files={"audio": ("q.wav", b"abc", "audio/wav")}).status_code == 503
 
+
+
+# -- clean checkout ----------------------------------------------------------------------
+
+def test_app_starts_on_a_clean_checkout(tmp_path):
+    """The default SQLite path's directory does not exist on a fresh clone; startup must create it."""
+    path = tmp_path / "clone" / "data" / "app.db"
+    settings = SETTINGS.model_copy(update={"database_url": f"sqlite+aiosqlite:///{path}"})
+    with TestClient(create_app(settings, analyzer=FakeAnalyzer())) as client:
+        assert client.get("/health").json()["status"] == "ok"
+    assert path.is_file()

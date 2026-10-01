@@ -11,6 +11,7 @@ from statistics import median
 from typing import Any
 
 from weather_risk.agent.schemas import QueryPlan
+from weather_risk.scoring.coverage import weather_coverage
 from weather_risk.scoring.exposure import overall_score
 from weather_risk.scoring.robustness import near_ties, rank_stability
 from weather_risk.scoring.stats import day_stat
@@ -117,9 +118,35 @@ def _format_indicator(ind: dict) -> str:
 
 
 def _drivers(bd: dict, families: list[str], n: int = 3) -> list[str]:
-    indicators = [ind for f in families for lens in bd["families"][f]["lenses"].values()
-                  for ind in lens.get("indicators", [])]
+    indicators = [ind for f in families if not bd["families"][f].get("incomplete")
+                  for lens in bd["families"][f]["lenses"].values() for ind in lens.get("indicators", [])]
     return [_format_indicator(i) for i in sorted(indicators, key=lambda i: -i["score"])[:n]]
+
+
+# -- coverage rule (config/scoring.yaml → coverage, D24) ---------------------------------
+
+def _blocked(bd: dict, families: list[str]) -> bool:
+    """A requested family can't be scored because the hub's weather fails the coverage rule."""
+    return any(bd["families"][f].get("incomplete") for f in families)
+
+
+def _problems(bd: dict) -> str:
+    return " and ".join(bd.get("meta", {}).get("observed_window", {}).get("problems") or []) \
+        or "the weather record is incomplete"
+
+
+def _rule(ctx: ExecContext) -> str:
+    rule = ctx.cfg.coverage
+    return (f"A score needs at least {rule.min_pct:g}% of days with data and no gap longer than "
+            f"{rule.max_gap_days} days.")
+
+
+def _blocked_reason(ctx: ExecContext, hub_id: str, bd: dict, verb: str) -> tuple[str, str]:
+    return ("high", f"{ctx.name(hub_id)} is {verb}: its weather data is incomplete ({_problems(bd)}). {_rule(ctx)}")
+
+
+def _names(ctx: ExecContext, hub_ids: list[str]) -> str:
+    return " and ".join(ctx.name(h) for h in hub_ids)
 
 
 def _family_detail(bd: dict, family: str) -> dict:
@@ -184,8 +211,21 @@ async def _rank(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
     weights, weight_notes = _weights(plan, ctx)
     exposure = await ctx.analyzer.exposure(hub_ids)
     breakdowns = exposure.breakdowns
-    scores = {h: s for h, bd in breakdowns.items() if (s := overall_score(bd, weights, families)) is not None}
+    blocked = [h for h in hub_ids if _blocked(breakdowns[h], families)]
+    blocked_rows = [{"rank": None, "hub": ctx.name(h), "score": None,
+                     "note": f"Not ranked: incomplete weather data ({_problems(breakdowns[h])})"} for h in blocked]
+    blocked_reasons = [_blocked_reason(ctx, h, breakdowns[h], "not ranked") for h in blocked]
+    scores = {h: s for h, bd in breakdowns.items()
+              if h not in blocked and (s := overall_score(bd, weights, families)) is not None}
     if not scores:
+        windows, sources, assumptions, gaps = _exposure_context(ctx, exposure, families)
+        if blocked:
+            return ResultBundle(
+                "rank", f"No hub can be ranked on {_hazard_phrase(families, ctx)}: the weather data is incomplete "
+                        f"for {_names(ctx, blocked)}.",
+                rows=blocked_rows, details={"scope": scope, "not_ranked": [ctx.name(h) for h in blocked]},
+                points=[r for _, r in blocked_reasons], windows=windows, sources=sources, data_gaps=gaps,
+                uncertainty=blocked_reasons, assumptions=assumptions)
         return ResultBundle("rank", "No hub could be scored — every data source failed.",
                             data_gaps=sorted({g for bd in breakdowns.values() for g in bd["data_gaps"]}),
                             uncertainty=[("high", "No evidence was available for the requested hazards.")])
@@ -200,6 +240,7 @@ async def _rank(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
             row |= {ctx.short_label(f): r1(bd["families"][f]["score"]) for f in families}
         row["top hazard"] = ctx.short_label(max(families, key=lambda f: bd["families"][f]["score"] or 0))
         rows.append(row)
+    rows += blocked_rows
 
     check_k = min(k, 3)
     stability = rank_stability({h: breakdowns[h] for h in order}, families=families, family_weights=weights,
@@ -209,7 +250,8 @@ async def _rank(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
     stability["flips"] = [f"{f['scenario']}: {ctx.name(f['first'])} ranks first" for f in stability["flips"]]
     ties = near_ties([(ctx.name(h), scores[h]) for h in order], ctx.cfg.robustness.tie_margin, check_k)
 
-    uncertainty = [("medium", f"{a} and {b} are only {gap} points apart — treat them as tied.") for a, b, gap in ties]
+    uncertainty = blocked_reasons + [("medium", f"{a} and {b} are only {gap} points apart — treat them as tied.")
+                                     for a, b, gap in ties]
     n = stability["scenarios"]
     if stability["top1_unchanged"] < n:
         uncertainty.append(("medium", f"First place changes in {n - stability['top1_unchanged']} of {n} weight "
@@ -227,11 +269,14 @@ async def _rank(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
     runners = ", ".join(f"{ctx.name(h)} ({r1(scores[h])})" for h in order[1:3])
     headline = f"{ctx.name(top)} has the highest {_hazard_phrase(families, ctx)} among {scope} (score {r1(scores[top])}/100)"
     headline += f", followed by {runners}." if runners else "."
+    if blocked:
+        headline += f" Not ranked (incomplete weather data): {_names(ctx, blocked)}."
     drivers = {ctx.name(h): _drivers(breakdowns[h], families) for h in order[:check_k]}
     return ResultBundle(
         intent="rank", headline=headline, rows=rows,
         details={"scope": scope, "hazards": [ctx.family_label(f) for f in families],
-                 "weights": weights if weight_notes else "equal", "drivers": drivers, "robustness": stability},
+                 "weights": weights if weight_notes else "equal", "drivers": drivers, "robustness": stability,
+                 "not_ranked": [ctx.name(h) for h in blocked]},
         points=[f"{name}: {'; '.join(d[:2])}" for name, d in drivers.items()] + [r for _, r in uncertainty],
         windows=windows, sources=sources, data_gaps=gaps, uncertainty=uncertainty, assumptions=assumptions,
         follow_ups=[f"Why is {ctx.name(top)} ranked first?", f"Compare {ctx.name(top)} and {ctx.name(order[1])}"]
@@ -245,18 +290,27 @@ async def _compare(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
     weights, weight_notes = _weights(plan, ctx)
     exposure = await ctx.analyzer.exposure(hub_ids)
     bds = exposure.breakdowns
-    combined = {h: overall_score(bds[h], weights, families) or 0.0 for h in hub_ids}
+    blocked = [h for h in hub_ids if _blocked(bds[h], families)]
+    complete = [h for h in hub_ids if h not in blocked]
+    combined = {h: overall_score(bds[h], weights, families) or 0.0 for h in complete}
     rows = []
     for h in hub_ids:
         row: dict[str, Any] = {"hub": ctx.name(h)} | {ctx.short_label(f): r1(bds[h]["families"][f]["score"])
                                                        for f in families}
         if len(families) > 1:
-            row["combined"] = r1(combined[h])
+            row["combined"] = r1(combined.get(h))
+        if h in blocked:
+            row["note"] = f"Not compared: incomplete weather data ({_problems(bds[h])})"
         rows.append(row)
 
     differences, family_ties = [], []
     for f in families:
-        ranked = sorted(hub_ids, key=lambda h: -(bds[h]["families"][f]["score"] or 0))
+        scored = [h for h in hub_ids if bds[h]["families"][f]["score"] is not None]
+        if len(scored) < 2:
+            missing = [h for h in hub_ids if h not in scored]
+            differences.append(f"{ctx.family_label(f)}: not comparable — no score for {_names(ctx, missing)}")
+            continue
+        ranked = sorted(scored, key=lambda h: -(bds[h]["families"][f]["score"] or 0))
         lead, second = ranked[0], ranked[1]
         gap = (bds[lead]["families"][f]["score"] or 0) - (bds[second]["families"][f]["score"] or 0)
         differences.append(f"{ctx.family_label(f)}: {ctx.name(lead)} higher by {gap:.1f} points" if gap > 0
@@ -264,15 +318,28 @@ async def _compare(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
         if len(families) > 1 and gap < ctx.cfg.robustness.tie_margin:
             family_ties.append(f"On {ctx.short_label(f).lower()} alone, {ctx.name(lead)} and {ctx.name(second)} "
                                f"are within {gap:.1f} points — effectively tied.")
-    order = sorted(hub_ids, key=lambda h: -combined[h])
+    windows, sources, assumptions, gaps = _exposure_context(ctx, exposure, families)
+    blocked_reasons = [_blocked_reason(ctx, h, bds[h], "not compared") for h in blocked]
+    if len(complete) < 2:
+        why = "; ".join(f"{ctx.name(h)}'s weather data is incomplete ({_problems(bds[h])})" for h in blocked)
+        return ResultBundle(
+            intent="compare", rows=rows,
+            headline=f"I can't compare {_names(ctx, hub_ids)} on {_hazard_phrase(families, ctx)}: {why}, "
+                     "so its score is not computed.",
+            details={"hazards": [ctx.family_label(f) for f in families], "differences": differences,
+                     "not_compared": [ctx.name(h) for h in blocked]},
+            points=differences, windows=windows, sources=sources, data_gaps=gaps, uncertainty=blocked_reasons,
+            assumptions=assumptions)
+    order = sorted(complete, key=lambda h: -combined[h])
     gap = combined[order[0]] - combined[order[1]]
     others = " and ".join(f"{ctx.name(h)} ({r1(combined[h])})" for h in order[1:])
     headline = f"{ctx.name(order[0])} has the higher {_hazard_phrase(families, ctx)} ({r1(combined[order[0]])}/100) vs {others}."
-    uncertainty = [("low", t) for t in family_ties]
+    if blocked:
+        headline += f" Not compared (incomplete weather data): {_names(ctx, blocked)}."
+    uncertainty = blocked_reasons + [("low", t) for t in family_ties]
     if gap < ctx.cfg.robustness.tie_margin:
         uncertainty.append(("medium", f"{ctx.name(order[0])} and {ctx.name(order[1])} are only {gap:.1f} points "
                                       "apart — treat them as similarly exposed."))
-    windows, sources, assumptions, gaps = _exposure_context(ctx, exposure, families)
     if weight_notes:
         assumptions.append(f"Hazard weights changed for this answer: {', '.join(weight_notes)} (others ×1).")
     detail = {ctx.name(h): {ctx.short_label(f): _family_detail(bds[h], f) for f in families} for h in hub_ids}
@@ -303,17 +370,23 @@ async def _stat(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
         return ResultBundle("stat", f"I can't compute that window: {exc}.",
                             details={"available_data": f"{ARCHIVE_START} to {ctx.analyzer.data_end()}"},
                             uncertainty=[("high", str(exc))])
-    rows, sensitivity, grid_notes, uncertainty, gaps = [], {}, [], [], []
+    rows, sensitivity, grid_notes, uncertainty, gaps, partial = [], {}, [], [], [], {}
     for h in hub_ids:
         daily, hub_gaps = await ctx.analyzer.daily(h, window.start, window.end)
         gaps += hub_gaps
+        cov = weather_coverage(daily, window.start, window.end, [metric.variable], ctx.cfg.coverage)
+        if not cov["complete"]:  # partial record: no percentage, say why (coverage rule, D24)
+            partial[h] = " and ".join(cov["problems"])
+            rows.append({"hub": ctx.name(h), "days meeting threshold": None, "days with data": cov["days_with_data"],
+                         "% of days": None, "coverage %": cov["pct"],
+                         "note": "Partial: incomplete data, no percentage given"})
+            uncertainty.append(("high", f"{ctx.name(h)}: the weather record for {window.label} is incomplete "
+                                        f"({partial[h]}), so no share of days is given. {_rule(ctx)}"))
+            continue
         s = day_stat(daily, window.start, window.end, metric)
         rows.append({"hub": ctx.name(h), "days meeting threshold": s["count"], "days with data": s["days_with_data"],
-                     "% of days": s["pct"], "coverage %": s["coverage_pct"]})
+                     "% of days": s["pct"], "coverage %": cov["pct"]})
         sensitivity[ctx.name(h)] = s["sensitivity"]
-        if s["coverage_pct"] < 95:
-            uncertainty.append(("medium" if s["coverage_pct"] else "high",
-                                f"{ctx.name(h)}: only {s['coverage_pct']}% of days in the window have data."))
         pcts = [x["pct"] for x in s["sensitivity"] if x["pct"]]
         if len(pcts) >= 2 and max(pcts) >= 2 * min(pcts):
             lo = min(s["sensitivity"], key=lambda x: x["pct"] or 0)
@@ -326,13 +399,19 @@ async def _stat(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
             grid_notes.append(f"{ctx.name(h)}: values are for the reanalysis grid cell at {cell['latitude']:.2f}, "
                               f"{cell['longitude']:.2f} ({_km(hub.lat, hub.lon, cell['latitude'], cell['longitude']):.0f} "
                               "km from the hub point).")
-    first = rows[0]
-    if len(rows) == 1:
+    answered = [r for r in rows if r["% of days"] is not None]
+    if not answered:
+        headline = (f"I can't give a reliable share of days with {metric.short} at {_names(ctx, hub_ids)} in "
+                    f"{window.label}: the weather record is incomplete ({'; '.join(partial.values())}).")
+    elif len(rows) == 1:
+        first = rows[0]
         headline = (f"{first['% of days']}% of days at {first['hub']} in {window.label} had {metric.short} "
                     f"({first['days meeting threshold']} of {first['days with data']} days).")
     else:
-        parts = ", ".join(f"{r['hub']} {r['% of days']}% ({r['days meeting threshold']} days)" for r in rows)
+        parts = ", ".join(f"{r['hub']} {r['% of days']}% ({r['days meeting threshold']} days)" for r in answered)
         headline = f"Share of days in {window.label} with {metric.short}: {parts}."
+        if partial:
+            headline += f" {_names(ctx, list(partial))}: incomplete data, no percentage given."
     assumptions = [
         f"Definition: {metric.label}.",
         "Open-Meteo ERA5 reanalysis is modeled, not station-measured. It smooths daily extremes and can differ "
@@ -355,41 +434,58 @@ async def _explain(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
     bds = exposure.breakdowns
     bd = bds[hub]
     families = _families(plan, ctx)
-    n = len(bds)
-    overall_order = sorted(bds, key=lambda h: -(bds[h]["score"] or 0))
+    # Ranks and medians use only hubs with a score: an incomplete hub is not ranked (coverage rule).
+    ranked_overall = sorted((h for h in bds if bds[h]["score"] is not None), key=lambda h: -bds[h]["score"])
+    overall_rank = f"{ranked_overall.index(hub) + 1} of {len(ranked_overall)}" if hub in ranked_overall \
+        else "not ranked"
 
-    def family_rank(f: str) -> int:
-        return sorted(bds, key=lambda h: -(bds[h]["families"][f]["score"] or 0)).index(hub) + 1
+    def family_rank(f: str) -> str:
+        scored = sorted((h for h in bds if bds[h]["families"][f]["score"] is not None),
+                        key=lambda h: -bds[h]["families"][f]["score"])
+        return f"{scored.index(hub) + 1} of {len(scored)}" if hub in scored else "not ranked"
 
-    shown = sorted(families, key=lambda f: -(bd["families"][f]["contribution"] or 0))
+    def family_median(f: str) -> float | None:
+        values = [bds[h]["families"][f]["score"] for h in bds if bds[h]["families"][f]["score"] is not None]
+        return r1(median(values)) if values else None
+
+    shown = sorted(families, key=lambda f: (-(bd["families"][f]["contribution"] or 0),
+                                            -(bd["families"][f]["score"] if bd["families"][f]["score"] is not None else -1)))
     rows = [{"hazard": ctx.family_label(f), "score": r1(bd["families"][f]["score"]),
              "contribution to overall": r1(bd["families"][f]["contribution"]),
-             "rank among hubs": f"{family_rank(f)} of {n}",
-             "median across hubs": r1(median(bds[h]["families"][f]["score"] or 0 for h in bds))}
+             "rank among hubs": family_rank(f), "median across hubs": family_median(f)}
             for f in shown]
     top = shown[0]
-    if len(families) < len(ctx.cfg.families):
+    windows, sources, assumptions, _ = _exposure_context(ctx, exposure, families)
+    gaps = bd.get("data_gaps", [])
+    uncertainty = [("medium", g) for g in gaps]
+    if _blocked(bd, families):
+        headline = (f"{ctx.name(hub)} is not scored on {_hazard_phrase(families, ctx)}: its weather data for "
+                    f"{exposure.start.year}–{exposure.end.year} is incomplete ({_problems(bd)}), so it is not ranked.")
+        nri_only = [f for f in shown if bd["families"][f]["score"] is not None]
+        if nri_only:
+            headline += " Hazards scored from FEMA NRI alone: " + ", ".join(
+                f"{ctx.short_label(f).lower()} {r1(bd['families'][f]['score'])}/100" for f in nri_only) + "."
+        uncertainty.insert(0, _blocked_reason(ctx, hub, bd, "not scored"))
+    elif len(families) < len(ctx.cfg.families):
         combined = overall_score(bd, ctx.cfg.family_weights, families)
         headline = (f"{ctx.name(hub)} scores {r1(combined)}/100 on {_hazard_phrase(families, ctx)}; the biggest "
                     f"driver is {ctx.short_label(top).lower()} ({r1(bd['families'][top]['score'])}/100, "
-                    f"rank {family_rank(top)} of {n}).")
+                    f"rank {family_rank(top)}).")
     else:
         headline = (f"{ctx.name(hub)} has an overall exposure score of {r1(bd['score'])}/100 "
-                    f"(rank {overall_order.index(hub) + 1} of {n}). The largest contributor is "
-                    f"{ctx.short_label(top)} at {r1(bd['families'][top]['score'])}/100 (rank {family_rank(top)} of {n}).")
-    windows, sources, assumptions, _ = _exposure_context(ctx, exposure, families)
-    gaps = bd.get("data_gaps", [])
-    other = overall_order[0] if overall_order[0] != hub else overall_order[1]
+                    f"(rank {overall_rank}). The largest contributor is "
+                    f"{ctx.short_label(top)} at {r1(bd['families'][top]['score'])}/100 (rank {family_rank(top)}).")
+    other = next((h for h in ranked_overall if h != hub), None)
     return ResultBundle(
         intent="explain", headline=headline, rows=rows,
         details={"hub": f"{ctx.name(hub)} ({bd.get('meta', {}).get('county', ctx.hubs[hub].county)})",
-                 "overall_score": r1(bd["score"]), "overall_rank": f"{overall_order.index(hub) + 1} of {n}",
+                 "overall_score": r1(bd["score"]), "overall_rank": overall_rank,
                  "hazards": {ctx.short_label(f): _family_detail(bd, f) for f in shown},
                  "top_drivers": _drivers(bd, families, 4)},
-        points=_drivers(bd, families, 4), windows=windows, sources=sources, data_gaps=gaps,
-        uncertainty=[("medium", g) for g in gaps], assumptions=assumptions,
-        follow_ups=[f"Which evidence drives {ctx.name(hub)}'s {ctx.short_label(top).lower()} score?",
-                    f"Compare {ctx.name(hub)} with {ctx.name(other)}"],
+        points=_drivers(bd, families, 4) or [r for _, r in uncertainty[:1]], windows=windows, sources=sources,
+        data_gaps=gaps, uncertainty=uncertainty, assumptions=assumptions,
+        follow_ups=[f"Which evidence drives {ctx.name(hub)}'s {ctx.short_label(top).lower()} score?"]
+        + ([f"Compare {ctx.name(hub)} with {ctx.name(other)}"] if other else []),
     )
 
 

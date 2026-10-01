@@ -155,6 +155,8 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
                                  **{lens: data["score"] for lens, data in fam["lenses"].items()}}
                              for f, fam in bd["families"].items()},
                 "data_gaps": bd["data_gaps"],
+                "weather_complete": bd["meta"]["observed_window"].get("complete", True),
+                "coverage_pct": bd["meta"]["observed_window"].get("coverage_pct"),
             })
         rows.sort(key=lambda r: -(r["overall"] or 0))
         return {"window": {"start": result.start.isoformat(), "end": result.end.isoformat()},

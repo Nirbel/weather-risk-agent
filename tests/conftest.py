@@ -81,21 +81,33 @@ SYNTHETIC_SCORES = {  # every family scores 10 unless listed
 }
 
 
-def synthetic_breakdown(hub_id: str, gaps: list[str] | None = None) -> dict:
+INCOMPLETE_PROBLEMS = ["a 6-day gap with no data (2023-03-01 to 2023-03-06; at most 3 allowed)"]
+
+
+def synthetic_breakdown(hub_id: str, gaps: list[str] | None = None, incomplete: bool = False) -> dict:
+    """`incomplete`: the hub's weather fails the coverage rule → families using observed weather
+    (winter, flood, heat) and the overall score are None, as weather_risk.analysis produces them."""
     cfg = load_scoring_config()
     scores = {f: 10.0 for f in FAMILIES} | SYNTHETIC_SCORES.get(hub_id, {})
+    blocked = {f for f in FAMILIES if incomplete and cfg.families[f].observed}
     families = {
-        f: {"label": cfg.families[f].label, "score": s, "contribution": s / len(FAMILIES),
+        f: {"label": cfg.families[f].label, "score": None if f in blocked else s, "incomplete": f in blocked,
+            "contribution": None if incomplete else s / len(FAMILIES),
             "lenses": {"modeled": {"score": s, "weight": 0.5, "source": "FEMA National Risk Index",
                                    "indicators": [{"id": f"nri_{f}", "label": f"{f} indicator", "raw": s,
                                                    "unit": "percentile", "score": s}]}},
-            "missing_lenses": [], "missing_weight_share": 0.0}
+            "missing_lenses": ["observed"] if f in blocked else [], "missing_weight_share": 0.0}
         for f, s in scores.items()
     }
-    return {"hub_id": hub_id, "score": sum(scores.values()) / len(scores), "families": families,
-            "family_weights": cfg.family_weights, "top_family": max(scores, key=scores.get),
-            "data_gaps": gaps or [],
-            "meta": {"observed_window": {"start": "2021-01-01", "end": "2025-12-31", "coverage_pct": 100.0},
+    scored = {f: s for f, s in scores.items() if f not in blocked}
+    note = f"{hub_id}: observed weather is incomplete — not ranked."
+    return {"hub_id": hub_id, "score": None if incomplete else sum(scores.values()) / len(scores),
+            "families": families, "family_weights": cfg.family_weights, "top_family": max(scored, key=scored.get),
+            "data_gaps": (gaps or []) + ([note] if incomplete else []),
+            "meta": {"observed_window": {"start": "2021-01-01", "end": "2025-12-31",
+                                         "coverage_pct": 99.6 if incomplete else 100.0,
+                                         "complete": not incomplete,
+                                         "problems": INCOMPLETE_PROBLEMS if incomplete else []},
                      "grid_cell": {"latitude": 39.8, "longitude": -104.7, "elevation": 1650},
                      "nri_version": "December 2025", "county": "Test County"}}
 
@@ -103,11 +115,14 @@ def synthetic_breakdown(hub_id: str, gaps: list[str] | None = None) -> dict:
 class FakeAnalyzer:
     """Same interface as weather_risk.analysis.Analyzer, no data access."""
 
-    def __init__(self, gaps: dict[str, list[str]] | None = None):
+    def __init__(self, gaps: dict[str, list[str]] | None = None, incomplete: set[str] = frozenset(),
+                 missing_days: dict[str, set[date]] | None = None):
         self.today = date(2026, 10, 1)
         self.cfg = load_scoring_config()
         self.hubs = {h.id: h for h in load_hubs()}
         self.gaps = gaps or {}
+        self.incomplete = set(incomplete)  # hubs whose weather fails the coverage rule
+        self.missing_days = missing_days or {}  # hub → dates with no daily row (stat answers)
         self.weather = SimpleNamespace(grid_cell=self._grid_cell)
 
     async def _grid_cell(self, hub):
@@ -122,7 +137,8 @@ class FakeAnalyzer:
     async def exposure(self, hub_ids=None):
         start, end = self.window()
         ids = hub_ids or list(self.hubs)
-        return Exposure(start, end, {h: synthetic_breakdown(h, self.gaps.get(h)) for h in ids}, "December 2025")
+        return Exposure(start, end, {h: synthetic_breakdown(h, self.gaps.get(h), h in self.incomplete) for h in ids},
+                        "December 2025")
 
     async def daily(self, hub_id, start, end):
         """Denver 2025: 1.0 cm of snow on the first 30 days of the year, none otherwise (30 of 365 = 8.2 %)."""
@@ -130,6 +146,8 @@ class FakeAnalyzer:
         rows = []
         for i in range(days):
             d = start + timedelta(days=i)
+            if d in self.missing_days.get(hub_id, ()):
+                continue
             snowy = hub_id == "denver" and d.year == 2025 and d <= date(2025, 1, 30)
             rows.append(DailyRow(d, 1.0 if snowy else 0.0, 0.0, 10.0, -5.0 if snowy else 0.0, 10.0))
         return rows, []

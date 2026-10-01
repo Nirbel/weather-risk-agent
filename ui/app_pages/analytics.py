@@ -30,6 +30,7 @@ if not data:
 
 hubs = pd.DataFrame([{"hub_id": h["hub_id"], "hub": h["hub"], "region": h["region"], "overall": h["overall"],
                       "top hazard": FAMILIES.get(h["top_family"], "—"), "data gaps": len(h["data_gaps"]),
+                      "weather complete": h["weather_complete"], "weather coverage %": h["coverage_pct"],
                       **{f: h["families"][f]["score"] for f in FAMILIES}} for h in data["hubs"]])
 roster_order = list(hubs["hub"])  # stable order → stable colors
 hub_ids = {h["hub"]: h["hub_id"] for h in data["hubs"]}
@@ -43,13 +44,16 @@ with st.container(horizontal=True, vertical_alignment="bottom"):
 view = hubs[hubs["region"].isin(regions or list(REGIONS))].copy()
 view["score"] = view[focus]
 view = view.sort_values("score", ascending=False)
+# Coverage rule: a hub whose weather record is incomplete has no score for weather-based hazards → not ranked.
+unscored = view[view["score"].isna()]
+ranked = view.dropna(subset=["score"])
 
 with st.container(horizontal=True):
     st.metric("Exposure window", f"{data['window']['start'][:4]}–{data['window']['end'][:4]}", border=True)
     st.metric("FEMA NRI release", data["nri_version"] or "unavailable", border=True)
-    if not view.empty:
+    if not ranked.empty:
         st.metric(f"Most exposed ({'overall' if focus == 'overall' else FAMILIES[focus].lower()})",
-                  view.iloc[0]["hub"], f"{view.iloc[0]['score']:.1f} / 100", delta_color="off", border=True)
+                  ranked.iloc[0]["hub"], f"{ranked.iloc[0]['score']:.1f} / 100", delta_color="off", border=True)
     st.metric("Hubs with data gaps", int((hubs["data gaps"] > 0).sum()), border=True)
 
 # -- ranking + hazard grid -----------------------------------------------------------
@@ -57,7 +61,7 @@ left, right = st.columns(2)
 with left:
     with st.container(border=True):
         st.markdown(f"**Ranking — {'overall exposure' if focus == 'overall' else FAMILIES[focus]}**")
-        base = alt.Chart(view).encode(
+        base = alt.Chart(ranked).encode(
             y=alt.Y("hub:N", sort="-x", title=None, axis=alt.Axis(labelLimit=220)),
             x=alt.X("score:Q", scale=alt.Scale(domain=[0, 100]), title="Exposure score (0–100)"),
             tooltip=[alt.Tooltip("hub:N", title="Hub"), alt.Tooltip("score:Q", title="Score", format=".1f"),
@@ -65,7 +69,10 @@ with left:
         )
         bars = base.mark_bar(cornerRadiusEnd=4, color=colors["series"][0], size=18)
         labels = base.mark_text(align="left", dx=4, color=colors["ink2"]).encode(text=alt.Text("score:Q", format=".1f"))
-        st.altair_chart(bars + labels, height=36 * max(len(view), 1) + 40)
+        st.altair_chart(bars + labels, height=36 * max(len(ranked), 1) + 40)
+        if not unscored.empty:
+            st.caption(":material/warning: Not ranked — incomplete weather data (needs ≥ 99 % of days and no gap "
+                       "over 3 days): " + ", ".join(unscored["hub"]))
 with right:
     with st.container(border=True):
         st.markdown("**Hazard-family scores by hub**")
@@ -80,7 +87,7 @@ with right:
         rects = cells.mark_rect(cornerRadius=4, stroke=colors["surface"], strokeWidth=2).encode(
             color=alt.Color("value:Q", scale=alt.Scale(domain=[0, 100], range=SEQUENTIAL),
                             legend=alt.Legend(title="Score", orient="bottom")))
-        text = cells.mark_text(fontSize=12).encode(
+        text = cells.transform_filter("isValid(datum.value)").mark_text(fontSize=12).encode(
             text=alt.Text("value:Q", format=".0f"),
             color=alt.condition(alt.datum.value > 55, alt.value("#ffffff"), alt.value("#0b0b0b")))
         st.altair_chart(rects + text, height=36 * max(len(view), 1) + 60)

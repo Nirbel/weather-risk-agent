@@ -1,8 +1,10 @@
-"""Long-term Exposure Score (for investment decisions) — docs/DECISIONS.md D10–D12, D20.
+"""Long-term Exposure Score (for investment decisions) — docs/DECISIONS.md D10–D12, D20, D24.
 
 family score = weighted mean of its evidence lenses (observed weather, modeled NRI loss),
                renormalized over the lenses that exist by design or loaded successfully;
 overall      = weighted mean of family scores (equal weights by default).
+Incomplete weather (config coverage rule, D24) is not renormalized away: a family that uses
+observed weather gets no score, and neither does the overall, so the hub is not ranked on them.
 Every intermediate value is kept in the returned breakdown so "why" answers can cite it.
 """
 
@@ -23,11 +25,14 @@ LENS_SOURCES = {
 class HubInputs:
     daily: list[DailyRow]  # empty = no weather data available
     nri: dict[str, dict] | None  # hazard code → {"alrb", "pct"}; None = source unavailable
+    weather_complete: bool = True  # False = the record fails the coverage rule (analysis.py decides)
 
 
-def _observed_lens(family: Family, daily: list[DailyRow]) -> dict | None:
+def _observed_lens(family: Family, daily: list[DailyRow], complete: bool) -> dict | None:
     if not family.observed:
         return None  # lens not used for this family (by design)
+    if not complete or not daily:
+        return {"score": None, "indicators": [], "incomplete": True, "source": LENS_SOURCES["observed"]}
     indicators = []
     for spec in family.observed:
         rate, _ = days_per_year(daily, spec.variable, spec.op, spec.threshold)
@@ -69,15 +74,17 @@ def score_family(name: str, inputs: HubInputs, cfg: ScoringConfig) -> dict:
     family = cfg.families[name]
     weights = cfg.lens_weights_for(name)
     built = {
-        "observed": _observed_lens(family, inputs.daily),
+        "observed": _observed_lens(family, inputs.daily, inputs.weather_complete),
         "modeled": _modeled_lens(family, inputs.nri, cfg.nri_hazard_names),
     }
     lenses = {lens: data | {"weight": getattr(weights, lens)} for lens, data in built.items() if data is not None}
     missing = [lens for lens, data in lenses.items() if data["score"] is None]
     total_w = sum(data["weight"] for data in lenses.values())
+    incomplete = bool(lenses.get("observed", {}).get("incomplete"))
     return {
         "label": family.label,
-        "score": family_score_from_lenses(lenses),
+        "score": None if incomplete else family_score_from_lenses(lenses),
+        "incomplete": incomplete,
         "lenses": lenses,
         "missing_lenses": missing,
         "missing_weight_share": sum(lenses[m]["weight"] for m in missing) / total_w if total_w else 0.0,
@@ -85,8 +92,11 @@ def score_family(name: str, inputs: HubInputs, cfg: ScoringConfig) -> dict:
 
 
 def overall_score(breakdown: dict, family_weights: dict[str, float], families: list[str] | None = None) -> float | None:
-    """Weighted mean of family scores; families without a score are skipped."""
+    """Weighted mean of family scores. None if any requested family has incomplete weather data;
+    a family with no evidence at all (e.g. NRI down) is skipped and reported as a data gap."""
     families = families or list(family_weights)
+    if any(breakdown["families"].get(f, {}).get("incomplete") for f in families):
+        return None
     pairs = [(family_weights.get(f, 0.0), breakdown["families"][f]["score"])
              for f in families if breakdown["families"].get(f, {}).get("score") is not None]
     total = sum(w for w, _ in pairs)
@@ -104,9 +114,10 @@ def compute_exposure(hub_id: str, inputs: HubInputs, cfg: ScoringConfig,
     scored = {f: v for f, v in families.items() if v["score"] is not None}
     total_w = sum(weights.get(f, 0.0) for f in scored)
     for f, fam in families.items():
-        fam["contribution"] = fam["score"] * weights.get(f, 0.0) / total_w if f in scored and total_w else None
+        fam["contribution"] = (fam["score"] * weights.get(f, 0.0) / total_w
+                               if breakdown["score"] is not None and f in scored and total_w else None)
     breakdown["top_family"] = max(scored, key=lambda f: scored[f]["score"]) if scored else None
     gaps = [f"{LENS_SOURCES[lens]} unavailable — {fam['label']} score uses the remaining evidence."
-            for fam in families.values() for lens in fam["missing_lenses"]]
+            for fam in families.values() if not fam["incomplete"] for lens in fam["missing_lenses"]]
     breakdown["data_gaps"] = list(dict.fromkeys(gaps))
     return breakdown

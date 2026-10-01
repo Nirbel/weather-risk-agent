@@ -125,8 +125,15 @@ class Climatology(_Strict):
     years: int = Field(ge=1, le=10)
 
 
+class CoverageRule(_Strict):
+    """Weather data is complete enough to score or rank only if both conditions hold."""
+    min_pct: float = Field(gt=0, le=100)  # share of expected days that have data
+    max_gap_days: int = Field(ge=0)       # longest allowed run of consecutive missing days
+
+
 class ScoringConfig(_Strict):
     climatology: Climatology
+    coverage: CoverageRule
     family_weights: dict[str, float]
     lens_weights: LensWeights
     families: dict[str, Family]

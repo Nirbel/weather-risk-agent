@@ -68,3 +68,17 @@ async def test_conversations_are_per_user_with_history(db):
     assert [t["user_text"] for t in await db.conversation_turns(cid)] == ["Midwest winter?", "Why?"]
     assert await db.conversation_owner(other) == "bob@example.com"
     assert await db.conversation_owner("nope") is None
+
+
+# -- clean checkout: data/ does not exist yet -------------------------------------------
+
+async def test_missing_database_directory_is_created(tmp_path):
+    # Regression: a fresh clone has no data/ directory, and SQLite raised
+    # "sqlite3.OperationalError: unable to open database file".
+    path = tmp_path / "fresh-clone" / "data" / "app.db"
+    database = Database(f"sqlite+aiosqlite:///{path}")
+    await database.create_all()
+    await database.upsert_daily("denver", [row(1)])
+    assert [r.date for r in await database.daily("denver", date(2025, 1, 1), date(2025, 1, 31))] == [date(2025, 1, 1)]
+    await database.dispose()
+    assert path.is_file()

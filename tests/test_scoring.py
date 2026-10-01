@@ -53,6 +53,7 @@ def test_days_per_year_none_when_no_data():
 
 CFG = ScoringConfig.model_validate({
     "climatology": {"years": 4},
+    "coverage": {"min_pct": 99, "max_gap_days": 3},
     "family_weights": {"winter": 1, "hurricane": 1},
     "lens_weights": {"observed": 0.5, "modeled": 0.5},
     "nri_hazard_names": {"WNTW": "Winter weather", "HRCN": "Hurricane"},
@@ -118,10 +119,32 @@ def test_missing_nri_is_flagged_and_weights_renormalize():
     assert result["score"] == pytest.approx(50)  # overall over the families that have evidence
 
 
-def test_missing_weather_is_flagged():
+def test_missing_weather_makes_weather_families_unscorable():
+    # No weather at all must not quietly become an NRI-only winter score (coverage rule).
     result = exposure.compute_exposure("x", exposure.HubInputs([], NRI), CFG)
-    assert result["families"]["winter"]["missing_lenses"] == ["observed"]
-    assert any("Open-Meteo" in gap for gap in result["data_gaps"])
+    winter = result["families"]["winter"]
+    assert winter["missing_lenses"] == ["observed"] and winter["incomplete"] is True
+    assert winter["score"] is None and result["score"] is None
+
+
+def test_incomplete_weather_blocks_weather_families_and_overall():
+    # Weather present but failing the coverage rule: winter (observed 0.5 + NRI 0.5) is NOT renormalized
+    # to NRI alone; hurricane (NRI only, by design) is unaffected: 60. Overall needs every family → None.
+    result = exposure.compute_exposure(
+        "x", exposure.HubInputs(four_years_with_snow_days(10), NRI, weather_complete=False), CFG)
+    winter, hurricane = result["families"]["winter"], result["families"]["hurricane"]
+    assert winter["score"] is None and winter["incomplete"] is True
+    assert winter["lenses"]["observed"]["score"] is None
+    assert hurricane["score"] == 60 and not hurricane.get("incomplete")
+    assert result["score"] is None
+    assert winter["contribution"] is None and hurricane["contribution"] is None
+    assert not any("remaining evidence" in gap for gap in result["data_gaps"])
+
+
+def test_overall_score_needs_every_requested_family_complete():
+    breakdown = {"families": {"winter": {"score": None, "incomplete": True}, "hurricane": {"score": 60.0}}}
+    assert exposure.overall_score(breakdown, {"winter": 1, "hurricane": 1}) is None
+    assert exposure.overall_score(breakdown, {"winter": 1, "hurricane": 1}, ["hurricane"]) == 60
 
 
 def test_overall_is_equal_weight_mean_and_names_top_family():

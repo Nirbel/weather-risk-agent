@@ -8,12 +8,11 @@ from datetime import date
 
 from weather_risk.config import Hub, ScoringConfig
 from weather_risk.data import HazardService, WeatherService
+from weather_risk.scoring.coverage import weather_coverage
 from weather_risk.scoring.exposure import HubInputs, compute_exposure
 from weather_risk.scoring.indicators import exceeds
 from weather_risk.sources.open_meteo import DailyRow
 from weather_risk.timewindow import archive_end, climatology_window
-
-COVERAGE_WARNING_PCT = 95.0
 
 
 @dataclass
@@ -41,6 +40,16 @@ class Analyzer:
     def data_end(self) -> date:
         return archive_end(self.today)
 
+    def observed_variables(self) -> list[str]:
+        """Daily variables the exposure score reads; a day counts as covered only if all are present."""
+        return sorted({spec.variable for fam in self.cfg.families.values() for spec in fam.observed})
+
+    def unrankable_note(self, hub: Hub, cov: dict, families: list[str] | None = None) -> str:
+        labels = [self.cfg.families[f].label.split(" (")[0].lower() for f in families or self.cfg.families
+                  if self.cfg.families[f].observed]
+        return (f"{hub.name}: observed weather is incomplete for {cov['window']} — " + " and ".join(cov["problems"])
+                + f". Its {', '.join(labels)} and overall scores are not computed, so it is not ranked on them.")
+
     async def exposure(self, hub_ids: list[str] | None = None) -> Exposure:
         """Exposure breakdowns for the given hubs (default: all), fetching missing data on demand."""
         start, end = self.window()
@@ -49,19 +58,21 @@ class Analyzer:
         async def one(hub: Hub) -> tuple[str, dict]:
             rows, weather_gaps = await self.weather.daily(hub, start, end)
             hub_nri = nri["by_fips"].get(hub.county_fips) if nri else None
-            breakdown = compute_exposure(hub.id, HubInputs(rows, hub_nri), self.cfg)
-            expected = (end - start).days + 1
-            with_data = sum(1 for r in rows if r.tmin_c is not None)
-            coverage = round(100.0 * with_data / expected, 1)
+            cov = weather_coverage(rows, start, end, self.observed_variables(), self.cfg.coverage)
+            cov["window"] = f"{start.year}–{end.year}"
+            breakdown = compute_exposure(hub.id, HubInputs(rows, hub_nri, weather_complete=cov["complete"]), self.cfg)
             gaps = [*nri_gaps, *weather_gaps, *breakdown["data_gaps"]]
             if nri and hub_nri is None:
                 gaps.append(f"FEMA NRI has no record for {hub.county} — modeled-loss evidence is missing.")
-            if rows and coverage < COVERAGE_WARNING_PCT:
-                gaps.append(f"{hub.name}: observed weather covers only {coverage}% of days in {start.year}–{end.year}.")
+            if not cov["complete"]:
+                gaps.append(self.unrankable_note(hub, cov))
             breakdown["data_gaps"] = list(dict.fromkeys(gaps))
             breakdown["meta"] = {
                 "observed_window": {"start": start.isoformat(), "end": end.isoformat(),
-                                    "days_with_data": with_data, "coverage_pct": coverage},
+                                    "days_with_data": cov["days_with_data"], "expected_days": cov["expected_days"],
+                                    "coverage_pct": cov["pct"], "longest_gap_days": cov["longest_gap_days"],
+                                    "longest_gap": cov["longest_gap"], "complete": cov["complete"],
+                                    "problems": cov["problems"]},
                 "grid_cell": await self.weather.grid_cell(hub),
                 "nri_version": nri["version"] if nri else None,
                 "county": f"{hub.county}, {hub.state} (FIPS {hub.county_fips})",
