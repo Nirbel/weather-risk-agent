@@ -22,6 +22,8 @@
 > - Analytics charts the same deterministic results chat uses.
 > - Alert settings (later): generic webhook URL, enabled flag, score-change threshold, Test Webhook. Webhooks stay provider-agnostic.
 >
+> **Status (2026-10-01, end of day):** M1–M8 done. The app runs with `uv run python scripts/run.py` (the default; Docker optional, D15). Alerts and voice: D22, D23. Design: [ARCHITECTURE.md](ARCHITECTURE.md).
+>
 > **Milestones now:**
 > - M1–M3 rescoped and done.
 > - M4: API + Streamlit UI (Home/Chat/Analytics) + run script + Docker.

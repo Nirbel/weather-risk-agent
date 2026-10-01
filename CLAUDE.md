@@ -5,6 +5,7 @@ Weather Risk Intelligence Agent: a chat agent that ranks, compares and explains 
 - Task: [docs/TASK.md](docs/TASK.md)
 - Plan: [docs/PLAN.md](docs/PLAN.md)
 - Decisions: [docs/DECISIONS.md](docs/DECISIONS.md)
+- Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ## Design principles
 

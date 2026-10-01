@@ -25,6 +25,8 @@ D21 records a scope narrowing requested mid-build. Entries that changed because 
 | D19 | Hub roster: 10 representative hubs (an assumption) | Scope |
 | D20 | Calibration after the first real-data run | KPI |
 | D21 | Narrow one-day scope (mid-build rescope) | Scope |
+| D22 | Score-change alerts: baseline diff, generic webhook | Bonus |
+| D23 | Voice input through the same LLM wrapper | Bonus |
 
 D8 (FEMA declarations) and D10 (separate near-term score) were removed by D21. They are kept below for the record.
 
@@ -147,7 +149,8 @@ D8 (FEMA declarations) and D10 (separate near-term score) were removed by D21. T
 
 ## D15 — One run script; Docker optional; no cloud deploy yet
 
-- **Decision:** `uv run python scripts/run.py` starts FastAPI (:8000) and Streamlit (:8501) together and stops them together. The Dockerfile runs the same script. There is no Makefile. The cloud host will be chosen later (user decision).
+- **Decision:** `uv run python scripts/run.py` is the default way to run the app. It starts FastAPI (:8000) and Streamlit (:8501) together and stops them together. There is no Makefile. The cloud host will be chosen later (user decision).
+- **Docker:** optional. The Dockerfile runs the same script. At the user's request the app is run and demoed with the script, not Docker. The image was not verified end to end on the build machine: its disk was full, and the build failed with an I/O error.
 
 ## D16 — Eval: offline replay by default, `--live` for the real LLM
 
@@ -199,3 +202,22 @@ D8 (FEMA declarations) and D10 (separate near-term score) were removed by D21. T
   - Alerts and voice stay outside the core until the agent, API, UI and evals work.
 - **Kept:** verified FIPS values, the YAML structure, recorded real API fixtures, the source adapters, the TDD approach and the D20 calibration.
 - **Lost evidence, stated in answers:** without FEMA declarations, hurricane and severe-storm scores rest on NRI alone.
+
+## D22 — Score-change alerts: baseline diff, generic webhook
+
+- **Decision:**
+  - A check scores all hubs and compares each overall Exposure Score with a **baseline**: the score analysts were last told about.
+  - A change of at least the threshold (default 5 points on 0–100) is stored and posted as JSON to one webhook URL.
+  - The baseline moves only when a hub alerts, so slow drift accumulates until it crosses the threshold.
+- **Triggers:** an in-process scheduler (every 24 h by default; its first check, 30 s after startup, records the baseline and warms the cache), or `POST /alerts/run` with an admin token or the `X-Alert-Secret` header for an external cron.
+- **Data gaps:** a hub with any data gap is skipped and keeps its baseline. Otherwise a failed Open-Meteo fetch would drop a lens, move the score and raise a false alert.
+- **Webhook:** provider-agnostic JSON with a `text` summary, which Slack incoming webhooks accept as-is. An admin sets URL, on/off and threshold in the UI, with a test button. Redirects are not followed.
+- **Why alert on exposure, not a forecast:** the near-term score was removed by D21. The trade-off is that exposure covers 5 completed years, so alerts are rare by design. They fire when the window rolls over each January, when FEMA publishes a new NRI release, when the scoring config changes, or when a data gap closes.
+- **Rejected:** alerting on rank changes (ties flip ranks on tiny moves), and per-family alerts (more noise for a bonus feature; the payload names the top hazard instead).
+
+## D23 — Voice input through the same LLM wrapper
+
+- **Decision:** Streamlit's chat input records audio. `POST /transcribe` sends it to Groq Whisper (`whisper-large-v3-turbo`) through LiteLLM. The text then goes through the normal chat turn and is shown as the user's message, so a mis-heard question is visible.
+- **Why:** it reuses the existing provider, key and LiteLLM dependency. There is no extra service, and nothing about how numbers are computed changes.
+- **Limitation:** the microphone appears only when a key for the transcription provider is set. There is no Gemini fallback for transcription.
+

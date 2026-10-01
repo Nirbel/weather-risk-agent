@@ -5,8 +5,9 @@ A chat agent that ranks, compares and explains how exposed US logistics hubs are
 - **Numbers come from code, not the LLM.** The LLM turns a question into a schema-validated query plan and explains the computed result. A grounding check rejects any number it invents.
 - **Every answer states** its assumptions, uncertainty, data sources and time window.
 - **Real public data, fetched on demand:** Open-Meteo ERA5 daily weather (previous 5 completed years) and the FEMA National Risk Index.
+- **Bonuses:** score-change alerts to a webhook (scheduled or triggered), and voice questions.
 
-Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Decisions: [docs/DECISIONS.md](docs/DECISIONS.md) · Plan: [docs/PLAN.md](docs/PLAN.md) · Task: [docs/TASK.md](docs/TASK.md)
+Design (components, repo structure, storage): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Decisions: [docs/DECISIONS.md](docs/DECISIONS.md) · Plan: [docs/PLAN.md](docs/PLAN.md) · Task: [docs/TASK.md](docs/TASK.md)
 
 ## Run it
 
@@ -23,19 +24,19 @@ uv run python scripts/run.py
 | UI (Home · Chat · Analytics) | http://localhost:8501 — log in with an email from `AUTH_ALLOWLIST` |
 | API + interactive docs | http://localhost:8000/docs |
 
-`scripts/run.py` starts the API and the UI together and stops both on Ctrl-C.
+`scripts/run.py` is the way to run the app. It starts the API, waits until it is healthy, starts the UI, and stops both on Ctrl-C (or if either one exits).
 
-**With Docker** (the image runs the same script):
+**Before a demo (optional):** data is fetched when a question needs it. A cold first ranking of all 10 hubs takes about 3 minutes on Open-Meteo's free tier. The alert scheduler's first check, 30 seconds after startup, also fills the cache. To fill it by hand:
+
+```bash
+uv run python -m weather_risk.warm
+```
+
+**Docker (optional, not needed).** The image runs the same script:
 
 ```bash
 docker build -t weather-risk .
 docker run --env-file .env -p 8000:8000 -p 8501:8501 -v "$PWD/data:/app/data" weather-risk
-```
-
-**Before a demo (optional):** data is fetched when a question needs it. A cold first ranking of all 10 hubs takes about 3 minutes on Open-Meteo's free tier. To pre-fill the cache:
-
-```bash
-uv run python -m weather_risk.warm
 ```
 
 ## Try these
@@ -45,6 +46,19 @@ uv run python -m weather_risk.warm
 - What percentage of days in Denver last year had snowfall? → *And the year before?*
 - Why is the Dallas hub's weather disruption risk high?
 - Rank all hubs, but weight hurricane risk twice as much.
+
+## Alerts and voice (bonuses)
+
+- **Score-change alerts.** A daily check in the API process compares each hub's overall Exposure Score with the last value analysts were told about. A change of at least the threshold (default 5 points) is stored and posted as JSON to a webhook. The payload has a `text` summary, so a Slack incoming webhook works as-is.
+  - Admins set the webhook URL, on/off and threshold at the bottom of **Analytics**, with *Send test* and *Check now* buttons.
+  - An external cron can trigger a check:
+
+    ```bash
+    curl -X POST localhost:8000/alerts/run -H "X-Alert-Secret: $ALERT_TRIGGER_SECRET"
+    ```
+
+  - Exposure covers 5 completed years, so scores move only when the window rolls over (January), FEMA publishes a new NRI release, or the config changes. Hubs with data gaps are skipped, so a failed fetch never looks like a change.
+- **Voice.** With `GROQ_API_KEY` set, the chat box shows a microphone. The recording is transcribed by Groq Whisper (through LiteLLM) and asked like a typed question.
 
 ## Test and evaluate
 
@@ -71,6 +85,11 @@ uv run python -m weather_risk.warm --replay      # exposure table from recorded 
 | `config/scoring.yaml` | Thresholds, anchors, weights, stat definitions (validated at startup) |
 | `LLM_MODEL` / `LLM_FALLBACK_MODEL` | Default `groq/openai/gpt-oss-20b` → `gemini/gemini-3.8-flash` |
 | `AUTH_ALLOWLIST` | `email:role,…` with role `analyst` or `admin` |
+| `JWT_SECRET` | Signs login tokens; use 32+ random bytes |
+| `ALERT_WEBHOOK_URL` / `ALERT_THRESHOLD` | Alert defaults until an admin saves settings in the UI (threshold default 5 points) |
+| `ALERT_CHECK_HOURS` / `SCHEDULER_ENABLED` | Scheduled check interval (default 24 h) / turn the scheduler off |
+| `ALERT_TRIGGER_SECRET` | Lets an external cron call `POST /alerts/run` with header `X-Alert-Secret` |
+| `TRANSCRIBE_MODEL` | Voice input, default `groq/whisper-large-v3-turbo` |
 | `DATABASE_URL` | Default `sqlite+aiosqlite:///data/app.db` |
 
 ## Data and licenses

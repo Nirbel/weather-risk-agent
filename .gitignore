@@ -13,7 +13,7 @@ __pycache__/
 # Secrets
 .env
 
-# Runtime data (the committed seed lives in data/seed/)
+# Runtime data (fetched on demand and cached; test fixtures live in tests/fixtures/recorded/)
 data/app.db
 data/app.db-*
 

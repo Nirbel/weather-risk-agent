@@ -13,5 +13,6 @@ COPY . .
 RUN uv sync --frozen --no-dev
 
 EXPOSE 8000 8501
-# The database is seeded from data/seed/ on first start; mount /app/data to keep it.
+# Optional: the default way to run is `uv run python scripts/run.py` on the host.
+# Data is fetched on demand and cached in data/app.db; mount /app/data to keep it.
 CMD ["uv", "run", "--no-dev", "python", "scripts/run.py", "--host", "0.0.0.0"]
