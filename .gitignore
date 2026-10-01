@@ -1,0 +1,21 @@
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets
+.env
+
+# Runtime data (the committed seed lives in data/seed/)
+data/app.db
+data/app.db-*
+
+# Eval output
+eval/reports/
