@@ -48,7 +48,11 @@ def test_changes_are_ordered_by_size():
     assert [(c.hub_id, c.delta) for c in changes] == [("c", 12.0), ("b", -8.0), ("a", 6.0)]
 
 
-# -- AlertService (in-memory DB, fake exposure, webhook mocked) -----------------------
+# -- AlertService: per-user webhooks (in-memory DB, fake exposure, webhooks mocked) -------
+
+ANA, BEN = "ana@moveo.co.il", "ben@moveo.co.il"
+HOOK_BEN = "https://hooks.example.com/ben"
+
 
 class ScoreAnalyzer:
     """Exposure with hand-set overall scores; `gaps` marks hubs whose data was incomplete."""
@@ -62,86 +66,149 @@ class ScoreAnalyzer:
         return Exposure(date(2021, 1, 1), date(2025, 12, 31), breakdowns, "December 2025")
 
 
-SETTINGS = Settings(alert_webhook_url=HOOK, alert_threshold=5.0)
+SETTINGS = Settings(alert_threshold=5.0)
 
 
-async def run(db, scores, *, settings=SETTINGS, gaps=None):
+async def run(db, scores, *, gaps=None):
     async with httpx.AsyncClient() as client:
-        return await AlertService(db, ScoreAnalyzer(scores, gaps), settings, client).run()
+        return await AlertService(db, ScoreAnalyzer(scores, gaps), SETTINGS, client).run()
 
 
-async def test_first_run_records_a_baseline_without_alerting(db):
+async def save(db, email, url=HOOK, *, enabled=True, threshold=5.0):
+    return await AlertService(db, ScoreAnalyzer({}), SETTINGS, None).update_settings(
+        email, webhook_url=url, enabled=enabled, threshold=threshold)
+
+
+def outcome(result, email):
+    return next(u for u in result["users"] if u["user"] == email)
+
+
+async def test_unconfigured_user_gets_defaults(db):
+    cfg = await AlertService(db, ScoreAnalyzer({}), SETTINGS, None).config(ANA)
+    assert (cfg["webhook_url"], cfg["enabled"], cfg["threshold"]) == (None, False, 5.0)
+
+
+async def test_a_check_without_subscribers_only_records_the_scores(db):
+    result = await run(db, {"miami": 41.04, "houston": 50.0})
+    assert result["users"] == [] and (await db.latest_snapshot())["scores"] == {"miami": 41.0, "houston": 50.0}
+
+
+async def test_first_check_after_saving_sets_the_users_baseline_without_alerting(db):
+    await save(db, ANA)
     with respx.mock(assert_all_called=False) as router:
         hook = router.post(HOOK).respond(200)
-        result = await run(db, {"miami": 41.04, "houston": 50.0})
-    assert result["status"] == "baseline" and result["changes"] == [] and not hook.called
-    assert (await db.latest_snapshot())["scores"] == {"miami": 41.0, "houston": 50.0}
+        result = await run(db, {"miami": 41.0})
+    assert outcome(result, ANA)["status"] == "baseline" and not hook.called
+    assert (await db.webhook_settings(ANA))["baseline"] == {"miami": 41.0}
 
 
-async def test_score_change_is_stored_and_posted_to_the_webhook(db):
+async def test_saving_takes_the_latest_check_as_the_baseline(db):
+    await run(db, {"miami": 41.0})
+    await save(db, ANA)
+    assert (await db.webhook_settings(ANA))["baseline"] == {"miami": 41.0}
     with respx.mock() as router:
-        hook = router.post(HOOK).respond(200)
-        await run(db, {"miami": 41.0, "houston": 50.0})
-        result = await run(db, {"miami": 47.3, "houston": 51.0})
-    assert result["status"] == "changes" and result["delivery"] == "sent"
-    body = json.loads(hook.calls.last.request.content)
+        router.post(HOOK).respond(200)
+        result = await run(db, {"miami": 47.3})
+    assert outcome(result, ANA)["changes"] == 1
+
+
+async def test_each_user_is_alerted_on_their_own_webhook_with_their_own_threshold(db):
+    await save(db, ANA, HOOK, threshold=5.0)
+    await save(db, BEN, HOOK_BEN, threshold=10.0)
+    with respx.mock(assert_all_called=False) as router:
+        ana_hook, ben_hook = router.post(HOOK).respond(200), router.post(HOOK_BEN).respond(200)
+        await run(db, {"miami": 41.0, "houston": 50.0})  # baselines
+        result = await run(db, {"miami": 47.3, "houston": 51.0})  # Miami +6.3: ≥ 5 (Ana), < 10 (Ben)
+    assert (outcome(result, ANA)["delivery"], outcome(result, BEN)["changes"]) == ("sent", 0)
+    assert ana_hook.call_count == 1 and not ben_hook.called
+    body = json.loads(ana_hook.calls.last.request.content)
     assert body["event"] == "hub_exposure_score_changed" and "Miami 41.0 → 47.3 (+6.3)" in body["text"]
     assert body["changes"] == [{"hub_id": "miami", "hub": "Miami", "old_score": 41.0, "new_score": 47.3,
                                 "delta": 6.3, "direction": "up", "top_hazard": "flood"}]
-    alerts = await db.recent_alerts()
-    assert [(a["hub_id"], a["old_score"], a["new_score"], a["delta"], a["delivery"]) for a in alerts] == [
-        ("miami", 41.0, 47.3, 6.3, "sent")]
+    assert [(a["hub_id"], a["old_score"], a["new_score"], a["delta"], a["delivery"])
+            for a in await db.recent_alerts(ANA)] == [("miami", 41.0, 47.3, 6.3, "sent")]
+    assert await db.recent_alerts(BEN) == []
+    # Ben's baseline did not move: Miami's change keeps accumulating toward his 10-point threshold.
+    assert (await db.webhook_settings(BEN))["baseline"]["miami"] == 41.0
 
 
 async def test_webhook_failure_is_recorded_not_raised(db):
+    await save(db, ANA)
     with respx.mock() as router:
         router.post(HOOK).respond(500)
         await run(db, {"miami": 41.0})
         result = await run(db, {"miami": 30.0})
-    assert result["delivery"] == "failed: HTTP 500"
-    assert (await db.recent_alerts())[0]["delivery"] == "failed: HTTP 500"
+    assert outcome(result, ANA)["delivery"] == "failed: HTTP 500"
+    assert (await db.recent_alerts(ANA))[0]["delivery"] == "failed: HTTP 500"
+
+
+async def test_redirects_are_not_followed(db):
+    await save(db, ANA)
+    with respx.mock(assert_all_called=False) as router:
+        router.post(HOOK).respond(302, headers={"Location": "http://169.254.169.254/latest"})
+        elsewhere = router.post("http://169.254.169.254/latest").respond(200)
+        await run(db, {"miami": 41.0})
+        result = await run(db, {"miami": 30.0})
+    assert outcome(result, ANA)["delivery"] == "failed: HTTP 302" and not elsewhere.called
+
+
+async def test_slow_webhook_times_out(db):
+    await save(db, ANA)
+    with respx.mock() as router:
+        hook = router.post(HOOK).mock(side_effect=httpx.ReadTimeout("too slow"))
+        await run(db, {"miami": 41.0})
+        result = await run(db, {"miami": 30.0})
+    assert outcome(result, ANA)["delivery"] == "failed: ReadTimeout"
+    assert hook.calls.last.request.extensions["timeout"]["read"] == 10
 
 
 async def test_hub_with_data_gaps_is_skipped_not_alerted(db):
+    await save(db, ANA)
     with respx.mock(assert_all_called=False) as router:
         hook = router.post(HOOK).respond(200)
         await run(db, {"miami": 41.0})
         result = await run(db, {"miami": 12.0}, gaps={"miami": ["Open-Meteo request failed"]})
-    assert result["changes"] == [] and result["skipped"] == {"miami": ["Open-Meteo request failed"]}
-    assert not hook.called and (await db.latest_snapshot())["scores"] == {"miami": 41.0}
+    assert outcome(result, ANA)["changes"] == 0 and result["skipped"] == {"miami": ["Open-Meteo request failed"]}
+    assert not hook.called and (await db.webhook_settings(ANA))["baseline"] == {"miami": 41.0}
 
 
-async def test_disabled_or_unset_webhook_still_records_alerts(db):
-    await db.save_alert_settings(webhook_url=HOOK, enabled=False, threshold=5.0, updated_by="boss@example.com")
+async def test_disabled_webhook_still_records_alerts_in_the_feed(db):
+    await save(db, ANA, enabled=False)
     with respx.mock(assert_all_called=False) as router:
         hook = router.post(HOOK).respond(200)
         await run(db, {"miami": 41.0})
         result = await run(db, {"miami": 50.0})
-    assert result["delivery"] == "disabled" and not hook.called
-    assert (await db.recent_alerts())[0]["delivery"] == "disabled"
+    assert outcome(result, ANA)["delivery"] == "disabled" and not hook.called
+    assert (await db.recent_alerts(ANA))[0]["delivery"] == "disabled"
 
 
-async def test_saved_threshold_overrides_the_env_default(db):
-    await db.save_alert_settings(webhook_url=None, enabled=True, threshold=10.0, updated_by="boss@example.com")
-    await run(db, {"miami": 41.0})
-    result = await run(db, {"miami": 50.0})  # +9 < 10
-    assert result["changes"] == [] and result["threshold"] == 10.0
-
-
-async def test_send_test_reports_the_outcome(db):
+async def test_send_test_posts_to_the_users_saved_url(db):
+    await save(db, ANA, enabled=False)  # a test is sent even while alerts are off
     with respx.mock() as router:
-        router.post(HOOK).respond(204)
+        hook = router.post(HOOK).respond(204)
         async with httpx.AsyncClient() as client:
-            ok = await AlertService(db, ScoreAnalyzer({}), SETTINGS, client).send_test()
+            ok = await AlertService(db, ScoreAnalyzer({}), SETTINGS, client).send_test(ANA)
     assert ok == {"ok": True, "delivery": "sent"}
+    assert json.loads(hook.calls.last.request.content)["event"] == "test"
     async with httpx.AsyncClient() as client:
-        missing = await AlertService(db, ScoreAnalyzer({}), Settings(alert_webhook_url=None),
-                                       client).send_test()
+        missing = await AlertService(db, ScoreAnalyzer({}), SETTINGS, client).send_test(BEN)
     assert missing == {"ok": False, "delivery": "no webhook URL set"}
 
 
-@pytest.mark.parametrize("url", ["ftp://example.com/x", "not a url", "file:///etc/passwd"])
-async def test_only_http_webhooks_are_accepted(db, url):
+@pytest.mark.parametrize("url", ["ftp://example.com/x", "not a url", "file:///etc/passwd", "https://",
+                                 "https://exa mple.com/hook", "javascript:alert(1)"])
+async def test_only_http_webhook_urls_are_accepted(db, url):
     with pytest.raises(ValueError):
-        await AlertService(db, ScoreAnalyzer({}), SETTINGS, None).update_settings(
-            webhook_url=url, enabled=True, threshold=5.0, updated_by="boss@example.com")
+        await save(db, ANA, url)
+
+
+@pytest.mark.parametrize("threshold", [0, -1, 101])
+async def test_threshold_must_be_within_the_score_range(db, threshold):
+    with pytest.raises(ValueError):
+        await save(db, ANA, threshold=threshold)
+
+
+async def test_any_http_endpoint_works_make_n8n_zapier_teams(db):
+    for url in ("https://hook.eu1.make.com/abc", "http://n8n.local:5678/webhook/weather",
+                "https://hooks.zapier.com/hooks/catch/1/2/", "https://prod.westeurope.logic.azure.com/workflows/x"):
+        assert (await save(db, ANA, url))["webhook_url"] == url

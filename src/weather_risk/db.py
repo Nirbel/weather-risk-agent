@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, event, func, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
@@ -35,6 +36,16 @@ def iso(dt: datetime | None) -> str | None:
 
 class Base(DeclarativeBase):
     pass
+
+
+class Account(Base):
+    """A user. Passwords are stored only as salted scrypt hashes (api/auth.py)."""
+
+    __tablename__ = "users"
+    email: Mapped[str] = mapped_column(String, primary_key=True)
+    password_hash: Mapped[str] = mapped_column(String)
+    role: Mapped[str] = mapped_column(String)  # analyst | admin
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class WeatherDay(Base):
@@ -97,7 +108,7 @@ class Turn(Base):
 
 
 class ScoreSnapshot(Base):
-    """The alert baseline: each hub's overall score as analysts were last told it."""
+    """One row per alert check: every hub's overall score at that time."""
 
     __tablename__ = "score_snapshots"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -105,27 +116,28 @@ class ScoreSnapshot(Base):
     scores: Mapped[Any] = mapped_column(JSON)  # hub_id → overall score
 
 
-class Alert(Base):
-    __tablename__ = "alerts"
+class WebhookSettings(Base):
+    """A user's own alert webhook. `baseline` = each hub's score as this user was last told it."""
+
+    __tablename__ = "webhook_settings"
+    user_email: Mapped[str] = mapped_column(String, primary_key=True)
+    webhook_url: Mapped[str | None] = mapped_column(String)
+    enabled: Mapped[bool] = mapped_column(Boolean)
+    threshold: Mapped[float] = mapped_column(Float)
+    baseline: Mapped[Any | None] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WebhookAlert(Base):
+    __tablename__ = "webhook_alerts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_email: Mapped[str] = mapped_column(String, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     hub_id: Mapped[str] = mapped_column(String)
     old_score: Mapped[float] = mapped_column(Float)
     new_score: Mapped[float] = mapped_column(Float)
     delta: Mapped[float] = mapped_column(Float)
     delivery: Mapped[str] = mapped_column(String)
-
-
-class AlertSettings(Base):
-    """Single row (id 1), edited by an admin in the UI. Absent → env defaults."""
-
-    __tablename__ = "alert_settings"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    webhook_url: Mapped[str | None] = mapped_column(String)
-    enabled: Mapped[bool] = mapped_column(Boolean)
-    threshold: Mapped[float] = mapped_column(Float)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    updated_by: Mapped[str] = mapped_column(String)
 
 
 def ensure_sqlite_directory(url: str) -> None:
@@ -171,6 +183,24 @@ class Database:
 
     async def dispose(self) -> None:
         await self.engine.dispose()
+
+    # -- accounts --------------------------------------------------------------------
+    async def get_account(self, email: str) -> dict | None:
+        async with self._read() as s:
+            account = await s.get(Account, email)
+            return None if account is None else {"email": account.email, "role": account.role,
+                                                 "password_hash": account.password_hash}
+
+    async def create_account(self, email: str, password_hash: str, role: str) -> bool:
+        """False if the email is taken (the existing account is never changed)."""
+        try:
+            async with self._tx() as s:
+                if await s.get(Account, email) is not None:
+                    return False
+                s.add(Account(email=email, password_hash=password_hash, role=role, created_at=utcnow()))
+        except IntegrityError:
+            return False
+        return True
 
     # -- weather -------------------------------------------------------------------
     async def upsert_daily(self, hub_id: str, rows: list[DailyRow]) -> None:
@@ -286,29 +316,45 @@ class Database:
         async with self._tx() as s:
             s.add(ScoreSnapshot(taken_at=utcnow(), scores=scores))
 
-    async def add_alerts(self, rows: list[dict], delivery: str) -> None:
+    async def webhook_settings(self, email: str) -> dict | None:
+        async with self._read() as s:
+            row = await s.get(WebhookSettings, email)
+            return None if row is None else _webhook(row)
+
+    async def all_webhook_settings(self) -> list[dict]:
+        async with self._read() as s:
+            return [_webhook(r) for r in await s.scalars(select(WebhookSettings).order_by(WebhookSettings.user_email))]
+
+    async def save_webhook_settings(self, email: str, *, webhook_url: str | None, enabled: bool, threshold: float,
+                                    baseline_if_new: dict[str, float] | None) -> None:
+        """Upsert URL, flag and threshold; an existing baseline is kept, a new user starts from `baseline_if_new`."""
+        async with self._tx() as s:
+            row = await s.get(WebhookSettings, email) or WebhookSettings(user_email=email, baseline=baseline_if_new)
+            row.webhook_url, row.enabled, row.threshold, row.updated_at = webhook_url, enabled, threshold, utcnow()
+            s.add(row)
+
+    async def set_baseline(self, email: str, baseline: dict[str, float]) -> None:
+        async with self._tx() as s:
+            row = await s.get(WebhookSettings, email)
+            if row is not None:
+                row.baseline = baseline
+
+    async def add_alerts(self, email: str, rows: list[dict], delivery: str) -> None:
         now = utcnow()
         async with self._tx() as s:
-            s.add_all(Alert(created_at=now, delivery=delivery, **row) for row in rows)
+            s.add_all(WebhookAlert(user_email=email, created_at=now, delivery=delivery, **row) for row in rows)
 
-    async def recent_alerts(self, limit: int = 50) -> list[dict]:
+    async def recent_alerts(self, email: str, limit: int = 50) -> list[dict]:
         async with self._read() as s:
-            alerts = await s.scalars(select(Alert).order_by(Alert.id.desc()).limit(limit))
+            alerts = await s.scalars(select(WebhookAlert).where(WebhookAlert.user_email == email)
+                                     .order_by(WebhookAlert.id.desc()).limit(limit))
             return [{"created_at": iso(a.created_at), "hub_id": a.hub_id, "old_score": a.old_score,
                      "new_score": a.new_score, "delta": a.delta, "delivery": a.delivery} for a in alerts]
 
-    async def alert_settings(self) -> dict | None:
-        async with self._read() as s:
-            row = await s.get(AlertSettings, 1)
-            return None if row is None else {
-                "webhook_url": row.webhook_url, "enabled": row.enabled, "threshold": row.threshold,
-                "updated_at": iso(row.updated_at), "updated_by": row.updated_by}
 
-    async def save_alert_settings(self, *, webhook_url: str | None, enabled: bool, threshold: float,
-                                  updated_by: str) -> None:
-        async with self._tx() as s:
-            await s.merge(AlertSettings(id=1, webhook_url=webhook_url, enabled=enabled, threshold=threshold,
-                                        updated_at=utcnow(), updated_by=updated_by))
+def _webhook(row: WebhookSettings) -> dict:
+    return {"user": row.user_email, "webhook_url": row.webhook_url, "enabled": row.enabled,
+            "threshold": row.threshold, "baseline": row.baseline, "updated_at": iso(row.updated_at)}
 
 
 def _turn(t: Turn) -> dict:

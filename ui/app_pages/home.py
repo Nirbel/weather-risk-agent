@@ -68,8 +68,11 @@ with right:
             "- **Hurricane and severe-storm scores rest on FEMA NRI alone** — reanalysis can't resolve "
             "hurricanes, tornadoes or hail.\n"
             "- **Thresholds and weights are judgment calls**, kept in config and shown in every answer.\n"
-            "- **Long-term exposure only** — no forecasts. Score-change alerts fire when the 5-year window rolls "
-            "over, FEMA publishes a new NRI release, or the scoring config changes, so they are rare by design."
+            "- **Incomplete weather is never ranked**: a hub needs at least 99 % of days with data and no gap "
+            "over 3 days, otherwise its weather-based scores are withheld and the answer says why.\n"
+            "- **Long-term exposure only** — no forecasts. Score-change alerts (set your webhook on the *Alerts* "
+            "page) fire when the 5-year window rolls over, FEMA publishes a new NRI release, or the scoring "
+            "config changes, so they are rare by design."
         )
     with st.container(border=True):
         st.subheader(":material/fact_check: How to read an answer", anchor=False)

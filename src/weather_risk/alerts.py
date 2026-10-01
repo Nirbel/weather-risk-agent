@@ -1,10 +1,13 @@
-"""Score-change alerts (bonus): tell analysts when a hub's overall Exposure Score moves.
+"""Score-change alerts (bonus): tell each user when a hub's overall Exposure Score moves.
+
+Every user can set their own generic webhook (URL, on/off, threshold) in the UI; nothing is tied
+to a provider, so Make, n8n, Zapier, Slack or Teams workflows, or any HTTP endpoint that accepts
+a JSON POST all work. A scheduled check (every ALERT_CHECK_HOURS, daily by default) or
+POST /alerts/run scores all hubs once, then compares the scores with each user's own baseline.
 
 Exposure covers the previous 5 completed years, so scores move only when the window rolls over
 (each January), FEMA publishes a new NRI release, the scoring config changes, or a data gap
-closes. A scheduled check (every ALERT_CHECK_HOURS, daily by default) or POST /alerts/run compares
-current scores with the baseline and posts changes of at least the threshold to a generic JSON
-webhook. See docs/DECISIONS.md D22.
+closes. See docs/DECISIONS.md D22.
 """
 
 import asyncio
@@ -20,6 +23,7 @@ from weather_risk.settings import Settings
 
 log = logging.getLogger("weather_risk.alerts")
 EVENT = "hub_exposure_score_changed"
+WEBHOOK_TIMEOUT_S = 10.0
 
 
 @dataclass(frozen=True)
@@ -57,37 +61,35 @@ def diff_scores(baseline: dict[str, float], current: dict[str, float | None],
 
 def validate_webhook_url(url: str) -> None:
     parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError("The webhook URL must be an http(s) URL.")
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or any(c.isspace() for c in url)
+            or len(url) > 2000):
+        raise ValueError("The webhook URL must be a valid http(s) URL.")
 
 
 class AlertService:
     def __init__(self, db: Database, analyzer, settings: Settings, client: httpx.AsyncClient | None):
         self.db, self.analyzer, self.settings, self.client = db, analyzer, settings, client
 
-    async def config(self) -> dict:
-        """Admin-saved settings, else the env defaults."""
-        saved = await self.db.alert_settings()
+    async def config(self, email: str) -> dict:
+        """The user's saved settings, else defaults (no URL, off, the default threshold)."""
+        saved = await self.db.webhook_settings(email)
         if saved:
-            return saved
-        url = self.settings.alert_webhook_url
-        return {"webhook_url": url, "enabled": bool(url), "threshold": self.settings.alert_threshold,
-                "updated_at": None, "updated_by": None}
+            return {k: saved[k] for k in ("webhook_url", "enabled", "threshold", "updated_at")}
+        return {"webhook_url": None, "enabled": False, "threshold": self.settings.alert_threshold, "updated_at": None}
 
-    async def update_settings(self, *, webhook_url: str | None, enabled: bool, threshold: float,
-                              updated_by: str) -> dict:
+    async def update_settings(self, email: str, *, webhook_url: str | None, enabled: bool, threshold: float) -> dict:
         webhook_url = (webhook_url or "").strip() or None
         if webhook_url:
             validate_webhook_url(webhook_url)
         if not 0 < threshold <= 100:
             raise ValueError("The threshold must be between 0 and 100 points.")
-        await self.db.save_alert_settings(webhook_url=webhook_url, enabled=enabled, threshold=threshold,
-                                          updated_by=updated_by)
-        return await self.config()
+        latest = await self.db.latest_snapshot()  # a new subscriber starts from the latest check
+        await self.db.save_webhook_settings(email, webhook_url=webhook_url, enabled=enabled, threshold=threshold,
+                                            baseline_if_new=latest["scores"] if latest else None)
+        return await self.config(email)
 
     async def run(self) -> dict:
-        """One check: score all hubs, diff against the baseline, record and deliver any alerts."""
-        cfg = await self.config()
+        """One check: score all hubs once, then diff, record and deliver per user."""
         result = await self.analyzer.exposure()
         current, skipped = {}, {}
         for hub_id, bd in result.breakdowns.items():
@@ -95,37 +97,43 @@ class AlertService:
                 current[hub_id], skipped[hub_id] = None, bd["data_gaps"] or ["no score"]
             else:
                 current[hub_id] = round(bd["score"], 1)
-        previous = await self.db.latest_snapshot()
-        outcome = {"checked_at": iso(utcnow()), "threshold": cfg["threshold"], "skipped": skipped,
-                   "window": {"start": result.start.isoformat(), "end": result.end.isoformat()}}
-        if previous is None:
-            await self.db.add_snapshot({h: s for h, s in current.items() if s is not None})
-            return outcome | {"status": "baseline", "changes": [], "delivery": None}
-
-        changes, baseline = diff_scores(previous["scores"], current, cfg["threshold"])
-        await self.db.add_snapshot(baseline)  # also records when the last check ran
-        if not changes:
-            return outcome | {"status": "no_changes", "changes": [], "delivery": None}
+        scored = {h: v for h, v in current.items() if v is not None}
+        await self.db.add_snapshot(scored)
+        window = {"start": result.start.isoformat(), "end": result.end.isoformat()}
+        checked_at = iso(utcnow())
         names = {h.id: h.name for h in load_hubs()}
-        items = [{"hub_id": c.hub_id, "hub": names.get(c.hub_id, c.hub_id), "old_score": c.old, "new_score": c.new,
-                  "delta": c.delta, "direction": "up" if c.delta > 0 else "down",
-                  "top_hazard": result.breakdowns[c.hub_id].get("top_family")} for c in changes]
-        text = (f"Weather risk: {len(items)} hub exposure score change(s) of at least {cfg['threshold']:g} points "
-                f"({outcome['window']['start'][:4]}–{outcome['window']['end'][:4]} window) — "
-                + "; ".join(f"{i['hub']} {i['old_score']:.1f} → {i['new_score']:.1f} ({i['delta']:+.1f})"
-                            for i in items))
-        delivery = await self._deliver(cfg, {"event": EVENT, "text": text, **outcome, "changes": items})
-        await self.db.add_alerts([{k: i[k] for k in ("hub_id", "old_score", "new_score", "delta")} for i in items],
-                                 delivery)
-        log.info("alert check: %d change(s), delivery %s", len(items), delivery)
-        return outcome | {"status": "changes", "changes": items, "delivery": delivery}
+        users = []
+        for sub in await self.db.all_webhook_settings():
+            if sub["baseline"] is None:
+                await self.db.set_baseline(sub["user"], scored)
+                users.append({"user": sub["user"], "status": "baseline", "changes": 0, "delivery": None})
+                continue
+            changes, baseline = diff_scores(sub["baseline"], current, sub["threshold"])
+            await self.db.set_baseline(sub["user"], baseline)
+            if not changes:
+                users.append({"user": sub["user"], "status": "no_changes", "changes": 0, "delivery": None})
+                continue
+            items = [{"hub_id": c.hub_id, "hub": names.get(c.hub_id, c.hub_id), "old_score": c.old,
+                      "new_score": c.new, "delta": c.delta, "direction": "up" if c.delta > 0 else "down",
+                      "top_hazard": result.breakdowns[c.hub_id].get("top_family")} for c in changes]
+            text = (f"Weather risk: {len(items)} hub exposure score change(s) of at least {sub['threshold']:g} "
+                    f"points ({window['start'][:4]}–{window['end'][:4]} window) — "
+                    + "; ".join(f"{i['hub']} {i['old_score']:.1f} → {i['new_score']:.1f} ({i['delta']:+.1f})"
+                                for i in items))
+            delivery = await self._deliver(sub, {"event": EVENT, "text": text, "checked_at": checked_at,
+                                                 "threshold": sub["threshold"], "window": window, "changes": items})
+            await self.db.add_alerts(sub["user"], [{k: i[k] for k in ("hub_id", "old_score", "new_score", "delta")}
+                                                   for i in items], delivery)
+            users.append({"user": sub["user"], "status": "changes", "changes": len(items), "delivery": delivery})
+        log.info("alert check: %d subscriber(s), %d notified", len(users), sum(u["changes"] > 0 for u in users))
+        return {"checked_at": checked_at, "window": window, "skipped": skipped, "users": users}
 
-    async def send_test(self) -> dict:
-        """Post a sample payload to the saved webhook, even while alerts are disabled."""
-        cfg = await self.config()
+    async def send_test(self, email: str) -> dict:
+        """Post a sample payload to the user's saved webhook, even while alerts are off."""
+        cfg = await self.config(email)
         delivery = await self._deliver(cfg | {"enabled": True}, {
             "event": "test", "text": "Test alert from the Weather Risk Intelligence Agent — the webhook works.",
-            "checked_at": iso(utcnow()), "changes": []})
+            "checked_at": iso(utcnow()), "threshold": cfg["threshold"], "changes": []})
         return {"ok": delivery == "sent", "delivery": delivery}
 
     async def _deliver(self, cfg: dict, payload: dict) -> str:
@@ -133,8 +141,9 @@ class AlertService:
             return "no webhook URL set"
         if not cfg["enabled"]:
             return "disabled"
-        try:
-            response = await self.client.post(cfg["webhook_url"], json=payload, timeout=10, follow_redirects=False)
+        try:  # bounded wait, and never follow a redirect to somewhere the user did not enter
+            response = await self.client.post(cfg["webhook_url"], json=payload, timeout=WEBHOOK_TIMEOUT_S,
+                                              follow_redirects=False)
         except httpx.HTTPError as exc:
             return f"failed: {exc.__class__.__name__}"
         return "sent" if response.is_success else f"failed: HTTP {response.status_code}"

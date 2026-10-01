@@ -6,17 +6,19 @@
 import asyncio
 import contextlib
 import logging
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from weather_risk.agent import llm
 from weather_risk.agent.schemas import AgentAnswer, QueryPlan
 from weather_risk.agent.service import Agent, ConversationAccessError
 from weather_risk.alerts import AlertService, run_on_schedule
 from weather_risk.analysis import build_analyzer
-from weather_risk.api.auth import User, current_user, login, require_admin, require_admin_or_trigger_secret
+from weather_risk.api.auth import (MAX_PASSWORD, User, current_user, ensure_demo_admin, login, require_admin,
+                                   require_admin_or_trigger_secret, signup)
 from weather_risk.config import load_hubs, load_scoring_config, validate_config
 from weather_risk.db import Database
 from weather_risk.scoring.exposure import overall_score
@@ -30,6 +32,13 @@ log = logging.getLogger("weather_risk.api")
 
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=MAX_PASSWORD)
+
+
+class SignupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # no "role" field: sign-up always creates an analyst
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(max_length=MAX_PASSWORD)
 
 
 class LoginResponse(BaseModel):
@@ -65,8 +74,13 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
     async def lifespan(app: FastAPI):
         validate_config()  # fail fast on a bad hubs.yaml / scoring.yaml
         app.state.settings = settings or get_settings()
+        if len((app.state.settings.jwt_secret or "").encode()) < 32:
+            log.warning("JWT_SECRET is unset or shorter than 32 bytes — using a random one; "
+                        "users log in again after a restart.")
+            app.state.settings = app.state.settings.model_copy(update={"jwt_secret": secrets.token_urlsafe(32)})
         app.state.db = db or Database(app.state.settings.database_url)
         await app.state.db.create_all()
+        await ensure_demo_admin(app.state.db, app.state.settings)
         client = make_client(app.state.settings.contact_email)
         app.state.analyzer = analyzer or build_analyzer(app.state.db, client)
         app.state.agent = Agent(app.state.db, app.state.analyzer, app.state.settings, completion=completion)
@@ -74,8 +88,6 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
         scheduler = None
         if app.state.settings.scheduler_enabled:
             scheduler = asyncio.create_task(run_on_schedule(app.state.alerts, app.state.settings.alert_check_hours))
-        if len(app.state.settings.jwt_secret.encode()) < 32:
-            log.warning("JWT_SECRET is shorter than 32 bytes — set a random one in .env.")
         yield
         if scheduler is not None:
             scheduler.cancel()
@@ -90,8 +102,14 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
 
     # -- auth --------------------------------------------------------------------------
     @app.post("/auth/login", response_model=LoginResponse, tags=["auth"])
-    def auth_login(body: LoginRequest, request: Request):
-        user, token = login(body.email, request.app.state.settings)
+    async def auth_login(body: LoginRequest, request: Request):
+        user, token = await login(request.app.state.db, body.email, body.password, request.app.state.settings)
+        return LoginResponse(token=token, email=user.email, role=user.role)
+
+    @app.post("/auth/signup", response_model=LoginResponse, status_code=201, tags=["auth"])
+    async def auth_signup(body: SignupRequest, request: Request):
+        """Create an analyst account (@moveo.co.il only) and log in."""
+        user, token = await signup(request.app.state.db, body.email, body.password, request.app.state.settings)
         return LoginResponse(token=token, email=user.email, role=user.role)
 
     # -- agent -------------------------------------------------------------------------
@@ -174,39 +192,41 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
             raise HTTPException(404, f"Unknown hub {hub_id!r}")
         return await request.app.state.agent.answer_plan(_explain_plan(hub_id), f"Explain {hub_id}", use_llm=False)
 
-    # -- alerts (bonus): score changes → webhook ------------------------------------------
+    # -- alerts (bonus): each user's own score-change webhook -----------------------------
     @app.get("/alerts", tags=["alerts"])
     async def alerts(request: Request, user: User = Depends(current_user)):
-        """Recent score-change alerts and when the last check ran."""
+        """Your recent score-change alerts, your settings, and when the last check ran."""
         db: Database = request.app.state.db
-        cfg = await request.app.state.alerts.config()
+        cfg = await request.app.state.alerts.config(user.email)
         names = {h.id: h.name for h in load_hubs()}
         snapshot = await db.latest_snapshot()
+        st = request.app.state.settings
         return {"last_check": snapshot["taken_at"] if snapshot else None, "threshold": cfg["threshold"],
                 "delivering": bool(cfg["enabled"] and cfg["webhook_url"]),
-                "check_every_hours": request.app.state.settings.alert_check_hours
-                if request.app.state.settings.scheduler_enabled else None,
-                "alerts": [a | {"hub": names.get(a["hub_id"], a["hub_id"])} for a in await db.recent_alerts()]}
+                "check_every_hours": st.alert_check_hours if st.scheduler_enabled else None,
+                "alerts": [a | {"hub": names.get(a["hub_id"], a["hub_id"])}
+                           for a in await db.recent_alerts(user.email)]}
 
     @app.get("/alerts/settings", tags=["alerts"])
-    async def alert_settings(request: Request, user: User = Depends(require_admin)):
-        return await request.app.state.alerts.config()
+    async def alert_settings(request: Request, user: User = Depends(current_user)):
+        return await request.app.state.alerts.config(user.email)
 
     @app.put("/alerts/settings", tags=["alerts"])
-    async def update_alert_settings(body: AlertSettingsRequest, request: Request, user: User = Depends(require_admin)):
+    async def update_alert_settings(body: AlertSettingsRequest, request: Request, user: User = Depends(current_user)):
+        """Save your webhook URL (any http(s) endpoint), on/off flag and threshold."""
         try:
-            return await request.app.state.alerts.update_settings(**body.model_dump(), updated_by=user.email)
+            return await request.app.state.alerts.update_settings(user.email, **body.model_dump())
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.post("/alerts/test", tags=["alerts"])
-    async def test_alert(request: Request, user: User = Depends(require_admin)):
-        """Send a sample payload to the saved webhook URL."""
-        return await request.app.state.alerts.send_test()
+    async def test_alert(request: Request, user: User = Depends(current_user)):
+        """Send a sample payload to your saved webhook URL."""
+        return await request.app.state.alerts.send_test(user.email)
 
     @app.post("/alerts/run", tags=["alerts"])
     async def run_alerts(request: Request, caller: str = Depends(require_admin_or_trigger_secret)):
-        """Check for score changes now. Admin token, or header X-Alert-Secret for an external cron."""
+        """Check every subscriber now. Admin token, or header X-Alert-Secret for an external cron."""
         return await request.app.state.alerts.run()
 
     # -- ops ---------------------------------------------------------------------------
