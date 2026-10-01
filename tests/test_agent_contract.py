@@ -9,7 +9,7 @@ from weather_risk.agent.schemas import Explanation, QueryPlan, strict_json_schem
 
 def plan(**overrides) -> dict:
     base = {
-        "intent": "rank", "hubs": None, "region": None, "hazards": None, "horizon": "long_term",
+        "intent": "rank", "hubs": None, "region": None, "hazards": None,
         "metric": None, "top_k": None, "time_preset": None, "year": None, "start_date": None,
         "end_date": None, "weight_overrides": None, "interpretation_notes": [],
         "clarification_question": None, "out_of_scope_reason": None,
@@ -45,8 +45,7 @@ def test_unknown_hub_rejected():
         ({"intent": "stat", "hubs": ["denver"], "metric": "snowfall_days"}, "stat needs a time_preset"),
         ({"hubs": ["miami"], "region": "south"}, "either hubs or region"),
         ({"intent": "stat", "hubs": ["denver"], "metric": "snowfall_days", "time_preset": "specific_year"}, "needs year"),
-        ({"intent": "outlook", "horizon": "long_term"}, "outlook needs horizon next_7_days"),
-        ({"intent": "rank", "horizon": "next_7_days"}, "use intent outlook"),
+        ({"intent": "outlook"}, "intent"),
         ({"intent": "clarify"}, "clarification_question"),
         ({"intent": "out_of_scope"}, "out_of_scope_reason"),
         ({"top_k": 0}, "top_k"),
@@ -90,7 +89,7 @@ def test_strict_schema_is_flat_closed_and_fully_required():
 def test_strict_schema_lists_hub_enum():
     hubs = strict_json_schema(QueryPlan)["properties"]["hubs"]
     enum_values = [n["enum"] for n in walk(hubs) if "enum" in n][0]
-    assert "denver" in enum_values and len(enum_values) == 15
+    assert "denver" in enum_values and len(enum_values) == 10
 
 
 def test_explanation_limits():

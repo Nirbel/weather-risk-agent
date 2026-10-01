@@ -16,11 +16,12 @@ from weather_risk.settings import Settings
 PROMPT = (Path(__file__).parent / "prompts" / "explainer.md").read_text()
 
 
-def build_messages(question: str, bundle: ResultBundle) -> list[dict]:
+def build_messages(question: str, bundle: ResultBundle, previous_question: str | None = None) -> list[dict]:
     result = json.dumps(bundle.for_llm(), ensure_ascii=False, default=str)
+    previous = f"PREVIOUS QUESTION: {previous_question}\n" if previous_question else ""
     return [
         {"role": "system", "content": PROMPT},
-        {"role": "user", "content": f"QUESTION: {question}\n\nRESULT:\n{result}"},
+        {"role": "user", "content": f"{previous}QUESTION: {question}\n\nRESULT:\n{result}"},
     ]
 
 
@@ -32,10 +33,10 @@ def template_explanation(bundle: ResultBundle) -> Explanation:
     )
 
 
-async def explain(question: str, bundle: ResultBundle, settings: Settings,
-                  completion=None) -> tuple[Explanation, CallMeta | None, str]:
+async def explain(question: str, bundle: ResultBundle, settings: Settings, completion=None,
+                  previous_question: str | None = None) -> tuple[Explanation, CallMeta | None, str]:
     """Returns (explanation, call metadata, "llm" | "template")."""
-    allowed = allowed_numbers(bundle.for_llm(), question)
+    allowed = allowed_numbers(bundle.for_llm(), question) | allowed_numbers(None, previous_question or "")
 
     def check(explanation: Explanation) -> None:
         bad = ungrounded_numbers(" ".join([explanation.summary, *explanation.reasoning]), allowed)
@@ -45,7 +46,7 @@ async def explain(question: str, bundle: ResultBundle, settings: Settings,
 
     try:
         explanation, meta = await structured_call(
-            build_messages(question, bundle), Explanation,
+            build_messages(question, bundle, previous_question), Explanation,
             models=[settings.llm_model, settings.llm_fallback_model],
             check=check, completion=completion, temperature=0.2, timeout=settings.llm_timeout_s,
         )

@@ -16,6 +16,27 @@ class Window:
     notes: list[str] = field(default_factory=list)
 
 
+ARCHIVE_LAG_DAYS = 6  # Open-Meteo ERA5 archive lags real time by about 6 days
+
+
+def climatology_window(today: date, years: int) -> tuple[date, date]:
+    """The previous `years` completed calendar years that the archive fully covers."""
+    last = today - timedelta(days=ARCHIVE_LAG_DAYS)
+    last_year = last.year if last == date(last.year, 12, 31) else last.year - 1
+    return date(last_year - years + 1, 1, 1), date(last_year, 12, 31)
+
+
+def archive_end(today: date) -> date:
+    """Last day the reanalysis archive reliably covers."""
+    return today - timedelta(days=ARCHIVE_LAG_DAYS)
+
+
+def year_span(year: int, today: date) -> tuple[date, date, bool]:
+    """Dates to request for one calendar year, and whether that year is complete in the archive."""
+    end = min(date(year, 12, 31), archive_end(today))
+    return date(year, 1, 1), end, end == date(year, 12, 31)
+
+
 def _feb_end(year: int) -> date:
     return date(year, 3, 1) - timedelta(days=1)
 

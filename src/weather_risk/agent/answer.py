@@ -9,14 +9,8 @@ from weather_risk.agent.schemas import AgentAnswer, Explanation, QueryPlan, Sour
 SOURCES = {
     "open_meteo_archive": ("Open-Meteo Historical Weather API (ERA5 reanalysis)",
                            "https://open-meteo.com/en/docs/historical-weather-api", "CC BY 4.0"),
-    "open_meteo_forecast": ("Open-Meteo Forecast API", "https://open-meteo.com/en/docs", "CC BY 4.0"),
-    "nws_alerts": ("NWS active alerts (api.weather.gov)", "https://www.weather.gov/documentation/services-web-api",
-                   "US public domain"),
     "fema_nri": ("FEMA National Risk Index (county)", "https://hazards.fema.gov/nri/",
                  "Building expected-annual-loss rate; national percentile computed over all US counties"),
-    "openfema": ("OpenFEMA Disaster Declarations Summaries",
-                 "https://www.fema.gov/openfema-data-page/disaster-declarations-summaries-v2",
-                 "Major-disaster (DR) declarations, de-duplicated"),
 }
 SEVERITY = {"low": 0, "medium": 1, "high": 2}
 

@@ -12,18 +12,17 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from weather_risk.hubs import load_hubs, load_scoring_config
+from weather_risk.config import load_hubs, load_scoring_config
 
 HUB_IDS = tuple(h.id for h in load_hubs())
-FAMILIES = tuple(load_scoring_config()["families"])
-METRICS = tuple(load_scoring_config()["stats"])
+FAMILIES = tuple(load_scoring_config().families)
+METRICS = tuple(load_scoring_config().stats)
 
 HubId = Literal[HUB_IDS]  # type: ignore[valid-type]
 Family = Literal[FAMILIES]  # type: ignore[valid-type]
 StatMetric = Literal[METRICS]  # type: ignore[valid-type]
-Intent = Literal["rank", "compare", "stat", "explain", "outlook", "clarify", "out_of_scope"]
+Intent = Literal["rank", "compare", "stat", "explain", "clarify", "out_of_scope"]
 Region = Literal["midwest", "south", "west", "northeast"]
-Horizon = Literal["long_term", "next_7_days"]
 TimePreset = Literal["last_calendar_year", "trailing_12_months", "last_winter", "year_to_date", "specific_year", "custom"]
 
 
@@ -39,12 +38,11 @@ class WeightOverrides(BaseModel):
 class QueryPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    intent: Intent = Field(description="rank hubs, compare hubs, stat (% of days), explain one hub's score, "
-                                       "outlook (next 7 days), clarify, or out_of_scope")
+    intent: Intent = Field(description="rank hubs, compare hubs, stat (% of past days), explain one hub's score, "
+                                       "clarify, or out_of_scope")
     hubs: list[HubId] | None = Field(description="Explicit hubs, or null to use region / all hubs")
     region: Region | None = Field(description="US Census region filter, or null")
     hazards: list[Family] | None = Field(description="Hazard families to focus on, or null for all")
-    horizon: Horizon = Field(description="long_term exposure (investment) or next_7_days (near-term risk)")
     metric: StatMetric | None = Field(description="For intent=stat: which day count")
     top_k: int | None = Field(description="How many ranked hubs to show, or null for all")
     time_preset: TimePreset | None = Field(description="For intent=stat: which window")
@@ -76,10 +74,6 @@ class QueryPlan(BaseModel):
                     errors.append("stat needs a metric")
                 if self.time_preset is None:
                     errors.append("stat needs a time_preset")
-            case "outlook" if self.horizon != "next_7_days":
-                errors.append("outlook needs horizon next_7_days")
-            case "rank" | "compare" if self.horizon == "next_7_days":
-                errors.append("for next-7-days questions use intent outlook")
             case "clarify" if not self.clarification_question:
                 errors.append("clarify needs a clarification_question")
             case "out_of_scope" if not self.out_of_scope_reason:

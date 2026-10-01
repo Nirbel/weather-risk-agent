@@ -4,11 +4,13 @@ from datetime import date, timedelta
 
 import pytest
 
+from weather_risk.config import StatMetric
 from weather_risk.scoring.stats import day_stat
 from weather_risk.sources.open_meteo import DailyRow
 from weather_risk.timewindow import WindowError, resolve_window
 
-SNOW_METRIC = {
+SNOW_METRIC = StatMetric.model_validate({
+    "short": "measurable snowfall",
     "label": "Days with measurable snowfall",
     "variable": "snowfall_cm",
     "op": "ge",
@@ -18,7 +20,7 @@ SNOW_METRIC = {
         {"label": "Measurable", "op": "ge", "threshold": 0.25},
         {"label": "≥ 2.5 cm", "op": "ge", "threshold": 2.5},
     ],
-}
+})
 
 
 def snow_rows(values):

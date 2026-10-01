@@ -1,0 +1,25 @@
+{
+  "recorded_at": "2026-10-01T18:32:52+00:00",
+  "today": "2026-10-01",
+  "years": [
+    2021,
+    2022,
+    2023,
+    2024,
+    2025,
+    2026
+  ],
+  "hubs": [
+    "chicago",
+    "minneapolis",
+    "detroit",
+    "kansas_city",
+    "denver",
+    "dallas",
+    "houston",
+    "miami",
+    "atlanta",
+    "newark"
+  ],
+  "attribution": "Weather data by Open-Meteo.com (CC BY 4.0), ERA5 reanalysis"
+}

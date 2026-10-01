@@ -21,10 +21,14 @@ Weather Risk Intelligence Agent: a chat agent that ranks, compares and explains 
   - Use small hand-computable fixtures. Work out expected values by hand; never copy them from the implementation's output.
 - **I/O glue** (HTTP clients, API routes, LLM wrapper): write tests alongside the code. Mock every external call (respx, mocked LiteLLM).
 - **Each milestone:** full suite green, then commit.
-- **Config is the source of truth.** Thresholds, anchors, weights and bands live in `config/scoring.yaml`; hubs live in `config/hubs.yaml`. Don't hard-code them.
+- **Config is the source of truth.** Thresholds, anchors and weights live in `config/scoring.yaml`; hubs live in `config/hubs.yaml`. Both are validated at startup by typed models (`weather_risk/config.py`). Don't hard-code them.
+- **Data is fetched on demand and cached** (Open-Meteo ERA5 + FEMA NRI). Recorded responses in `tests/fixtures/recorded/` are for tests and eval only — never a runtime dependency.
+- **Persistence:** async SQLAlchemy 2.0 + SQLite (aiosqlite).
+- **Before changing an agreed technology choice,** call it out and explain why first.
 - **LLM:** go through LiteLLM only. Primary is Groq `openai/gpt-oss-20b` (strict JSON schema); Gemini is the fallback. Keep prompts compact, because Groq's free tier allows 8K tokens/min.
 - **Running:**
   - `uv run python scripts/run.py` starts the API and Streamlit together.
   - Docker is optional; the image runs the same script.
   - There is no Makefile.
 - **Docs:** short, clear Markdown.
+- **Streamlit:** use the `developing-with-streamlit` skill.

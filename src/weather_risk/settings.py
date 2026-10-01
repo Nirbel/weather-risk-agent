@@ -12,10 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore")
 
-    # Storage
-    db_path: Path = ROOT / "data" / "app.db"
-    seed_dir: Path = ROOT / "data" / "seed"
-    config_dir: Path = ROOT / "config"
+    # Storage (async SQLAlchemy URL; SQLite file by default)
+    database_url: str = f"sqlite+aiosqlite:///{ROOT / 'data' / 'app.db'}"
 
     # Data sources (NWS asks for a contact in the User-Agent)
     contact_email: str = "weather-risk-agent@example.com"
@@ -30,7 +28,7 @@ class Settings(BaseSettings):
 
     # Auth: "email:role,email:role" with role in {analyst, admin}
     auth_allowlist: str = ""
-    jwt_secret: str = "dev-only-change-me"
+    jwt_secret: str = "dev-only-change-me-and-use-at-least-32-bytes"
     token_ttl_hours: int = 12
 
     # Alerts

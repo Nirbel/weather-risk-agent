@@ -1,5 +1,35 @@
 # Weather Risk Intelligence Agent — Plan
 
+> **Rescope addendum (2026-10-01, mid-build — requested by the user; see [DECISIONS.md D21](DECISIONS.md)).**
+> The plan below is the approved original. These changes override it:
+>
+> | Area | Original plan | Now |
+> |---|---|---|
+> | Hubs | 15 | 10 representative hubs (4 Midwest + Denver, Dallas, Houston, Miami + Atlanta, Newark) |
+> | Core sources | Open-Meteo archive + forecast, NWS, OpenFEMA, FEMA NRI | **Open-Meteo ERA5 archive + FEMA NRI only** |
+> | Exposure window | 10 years (2016–2025), preloaded seed | **Previous 5 completed years**, fetched on demand per (hub, year) and cached |
+> | Evidence lenses | observed / modeled / history | observed / modeled (hurricane and severe storm rest on NRI alone) |
+> | Near-term score + alerts | core | removed from the core; alerts are a later bonus, on exposure-score changes |
+> | Seed snapshot | runtime seed + fixtures | recorded responses are **test/eval fixtures only** |
+> | Config | YAML dicts | YAML validated at startup by typed Pydantic models |
+> | Persistence | stdlib `sqlite3` | **async SQLAlchemy 2.0 + aiosqlite** (call-out in D14) |
+>
+> **UI decisions for M4:**
+> - Top navigation with three pages: **Home**, **Chat**, **Analytics**.
+> - Home: welcome, methodology, data sources, limitations and example questions.
+> - Chat: its sidebar holds only conversation history (New Chat, previous conversations, reopen and continue).
+> - Voice input sits beside the chat input.
+> - Analytics charts the same deterministic results chat uses.
+> - Alert settings (later): generic webhook URL, enabled flag, score-change threshold, Test Webhook. Webhooks stay provider-agnostic.
+>
+> **Milestones now:**
+> - M1–M3 rescoped and done.
+> - M4: API + Streamlit UI (Home/Chat/Analytics) + run script + Docker.
+> - M5: eval.
+> - M6: auth (built with M4).
+> - M7: docs.
+> - M8 bonuses: alerts with webhook settings, then voice.
+
 ## Context
 
 A logistics company chooses a few US distribution hubs each year for weather-resilience investment. Analysts need an agent that answers questions such as:

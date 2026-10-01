@@ -1,20 +1,19 @@
-"""Open-Meteo archive (ERA5 reanalysis) and forecast clients.
+"""Open-Meteo historical weather API (ERA5 reanalysis) client.
 
 Free tier is non-commercial; data is CC-BY 4.0. Requests longer than 2 weeks or with
 more than 10 variables count as several API calls (see `call_weight`).
 """
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 import httpx
 
 from weather_risk.sources.http import get_json
+from weather_risk.timewindow import archive_end  # noqa: F401  (re-exported for callers)
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
-FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
-ARCHIVE_LAG_DAYS = 6
 ATTRIBUTION = "Weather data by Open-Meteo.com (CC BY 4.0), ERA5 reanalysis"
 
 # Open-Meteo daily variable → our column, with the unit we require.
@@ -37,11 +36,6 @@ class DailyRow:
     gust_kmh: float | None
 
 
-def archive_end(today: date) -> date:
-    """Last day the archive reliably has data for (ERA5T lag)."""
-    return today - timedelta(days=ARCHIVE_LAG_DAYS)
-
-
 def call_weight(n_days: int, n_vars: int = len(DAILY_VARS)) -> float:
     """Fractional API-call cost of one request (Open-Meteo pricing rule)."""
     return max(1.0, n_days / 14) * max(1.0, n_vars / 10)
@@ -54,11 +48,6 @@ def _params(lat: float, lon: float) -> dict[str, Any]:
 async def fetch_archive(client: httpx.AsyncClient, lat: float, lon: float, start: date, end: date) -> dict:
     params = _params(lat, lon) | {"start_date": start.isoformat(), "end_date": end.isoformat()}
     return await get_json(client, ARCHIVE_URL, source="open_meteo_archive", params=params)
-
-
-async def fetch_forecast(client: httpx.AsyncClient, lat: float, lon: float, days: int = 7) -> dict:
-    params = _params(lat, lon) | {"forecast_days": days}
-    return await get_json(client, FORECAST_URL, source="open_meteo_forecast", params=params)
 
 
 def parse_daily(payload: dict) -> list[DailyRow]:

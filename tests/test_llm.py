@@ -71,3 +71,36 @@ async def test_code_fences_and_tool_call_payloads_are_accepted():
     assert (await structured_call(MSGS, Thing, models=MODELS, completion=fenced))[0].size == 1
     tool = FakeCompletion(response(content=None, tool_args='{"name": "t", "size": 5}'))
     assert (await structured_call(MSGS, Thing, models=MODELS, completion=tool))[0].size == 5
+
+
+async def test_provider_schema_rejection_uses_the_validation_retry():
+    # Groq strict mode can return HTTP 400 "Generated JSON does not match the expected schema"
+    rejected = RuntimeError('GroqException - {"error":{"message":"Generated JSON does not match the expected schema",'
+                            '"code":"json_validate_failed"}}')
+    fake = FakeCompletion(rejected, '{"name": "a", "size": 1}')
+    obj, meta = await structured_call(MSGS, Thing, models=MODELS, completion=fake)
+    assert obj.size == 1 and meta.attempts == 2
+    assert fake.calls[1]["model"] == MODELS[0]  # retried on the primary, not treated as an outage
+    assert "schema" in meta.validation_errors[0]
+
+
+async def test_short_rate_limit_is_waited_out_on_the_same_model():
+    limited = RuntimeError("Rate limit reached for model on tokens per minute (TPM). Please try again in 0.01s.")
+    fake = FakeCompletion(limited, '{"name": "a", "size": 1}')
+    obj, meta = await structured_call(MSGS, Thing, models=MODELS, completion=fake)
+    assert meta.model == MODELS[0] and not meta.fallback_used
+    assert "rate limited" in meta.provider_errors[0]
+
+
+async def test_long_rate_limit_falls_back():
+    limited = RuntimeError("Rate limit reached. Please try again in 45.5s.")
+    fake = FakeCompletion(limited, '{"name": "a", "size": 1}')
+    _, meta = await structured_call(MSGS, Thing, models=MODELS, completion=fake)
+    assert meta.model == MODELS[1] and meta.fallback_used
+
+
+async def test_gemini_calls_omit_temperature():
+    fake = FakeCompletion(RuntimeError("down"), '{"name": "a", "size": 1}')
+    await structured_call(MSGS, Thing, models=MODELS, completion=fake, temperature=0.2)
+    assert fake.calls[0]["temperature"] == 0.2
+    assert "temperature" not in fake.calls[1]

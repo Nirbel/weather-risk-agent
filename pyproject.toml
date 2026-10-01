@@ -14,8 +14,8 @@ dependencies = [
     "streamlit>=1.64",
     "pyjwt>=2.10",
     "pyyaml>=6.0",
-    "apscheduler>=3.11,<4",
-    "python-multipart>=0.0.20",
+    "sqlalchemy[asyncio]>=2.0.40",
+    "aiosqlite>=0.21",
 ]
 
 [dependency-groups]
@@ -32,4 +32,4 @@ packages = ["src/weather_risk"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
-filterwarnings = ["ignore::DeprecationWarning"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore:Using `httpx` with `starlette.testclient`"]

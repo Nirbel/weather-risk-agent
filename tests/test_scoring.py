@@ -1,10 +1,11 @@
-"""Scoring core — written test-first. Every expected value is worked out by hand in the comment."""
+"""Scoring core — test-first. Every expected value is worked out by hand in the comment."""
 
 from datetime import date, timedelta
 
 import pytest
 
-from weather_risk.scoring import exposure, near_term, robustness
+from weather_risk.config import ScoringConfig
+from weather_risk.scoring import exposure, robustness
 from weather_risk.scoring.indicators import days_per_year, exceeds, piecewise
 from weather_risk.sources.open_meteo import DailyRow
 
@@ -27,9 +28,8 @@ def test_piecewise_interpolates_and_is_flat_outside():
 
 def test_piecewise_handles_decreasing_scores():
     pts = [[-25, 100], [-10, 20], [0, 0]]  # colder = worse
-    assert piecewise(-17.5, pts) == pytest.approx(60)  # midpoint of 100 and 20
-    assert piecewise(-40, pts) == 100
-    assert piecewise(5, pts) == 0
+    assert piecewise(-17.5, pts) == pytest.approx(60)
+    assert piecewise(-40, pts) == 100 and piecewise(5, pts) == 0
 
 
 def test_exceeds_operators():
@@ -38,7 +38,7 @@ def test_exceeds_operators():
 
 
 def test_days_per_year_scales_by_valid_days():
-    # 730.5 days = 2 years exactly; 6 qualifying days → 3 per year. A null day is not counted as data.
+    # 6 qualifying days among 730 valid days → 6 × 365.25 / 730 per year; a null day is not data
     values = [3.0] * 6 + [0.0] * 724 + [None]
     rate, n_valid = days_per_year(rows(values, "snowfall_cm"), "snowfall_cm", "ge", 2.5)
     assert n_valid == 730
@@ -51,11 +51,13 @@ def test_days_per_year_none_when_no_data():
 
 # -- exposure: lens and family aggregation -----------------------------------
 
-CFG = {
-    "lens_weights": {"observed": 0.4, "modeled": 0.4, "history": 0.2},
+CFG = ScoringConfig.model_validate({
+    "climatology": {"years": 4},
     "family_weights": {"winter": 1, "hurricane": 1},
-    "declarations_since": date(2000, 1, 1),
+    "lens_weights": {"observed": 0.5, "modeled": 0.5},
     "nri_hazard_names": {"WNTW": "Winter weather", "HRCN": "Hurricane"},
+    "robustness": {"perturbation": 0.25, "tie_margin": 3.0},
+    "stats": {},
     "families": {
         "winter": {
             "label": "Winter",
@@ -63,16 +65,11 @@ CFG = {
             "observed": [{"id": "snow_days", "label": "Snow days", "variable": "snowfall_cm", "op": "ge",
                           "threshold": 2.5, "full_score_at": 5}],
             "modeled": {"nri": ["WNTW"], "combine": "mean"},
-            "history": {"incident_types": ["Snowstorm"], "full_score_at": 4},
         },
-        "hurricane": {
-            "label": "Hurricane",
-            "observed": [],
-            "modeled": {"nri": ["HRCN"], "combine": "mean"},
-            "history": {"incident_types": ["Hurricane"], "full_score_at": 4},
-        },
+        "hurricane": {"label": "Hurricane", "observed": [], "modeled": {"nri": ["HRCN"], "combine": "mean"}},
     },
-}
+})
+NRI = {"WNTW": {"pct": 30.0, "alrb": 0.001}, "HRCN": {"pct": 60.0, "alrb": 0.01}}
 
 
 def four_years_with_snow_days(n: int) -> list[DailyRow]:
@@ -80,163 +77,74 @@ def four_years_with_snow_days(n: int) -> list[DailyRow]:
     return rows([3.0] * n + [0.0] * (1461 - n), "snowfall_cm")
 
 
-def decl(kind: str, year: int, title: str = "X") -> dict:
-    return {"disaster_number": year, "incident_type": kind, "declaration_date": f"{year}-06-01", "title": title}
+def with_lens_weights(cfg: ScoringConfig, family: str, observed: float, modeled: float) -> ScoringConfig:
+    data = cfg.model_dump()
+    data["families"][family]["lens_weights"] = {"observed": observed, "modeled": modeled}
+    return ScoringConfig.model_validate(data)
 
 
-def test_family_score_weights_three_lenses():
-    # observed: 10 snow days in 4 years → 2.5/yr → 50; modeled WNTW pct 30 → 30;
-    # history: 4 snowstorm DRs → 100.  0.4·50 + 0.4·30 + 0.2·100 = 52
-    inputs = exposure.HubInputs(
-        daily=four_years_with_snow_days(10),
-        nri={"WNTW": {"pct": 30.0, "alrb": 0.001}, "HRCN": {"pct": 60.0, "alrb": 0.01}},
-        declarations=[decl("Snowstorm", y) for y in (2001, 2005, 2010, 2020)] + [decl("Hurricane", 2008)],
-    )
-    result = exposure.compute_exposure("x", inputs, CFG)
+def test_family_score_weights_two_lenses():
+    # observed: 10 snow days in 4 years → 2.5/yr → 50; modeled WNTW pct 30 → 0.5·50 + 0.5·30 = 40
+    result = exposure.compute_exposure("x", exposure.HubInputs(four_years_with_snow_days(10), NRI), CFG)
     winter = result["families"]["winter"]
     assert winter["lenses"]["observed"]["score"] == pytest.approx(50)
     assert winter["lenses"]["modeled"]["score"] == 30
-    assert winter["lenses"]["history"]["score"] == 100
-    assert winter["score"] == pytest.approx(52)
+    assert winter["score"] == pytest.approx(40)
 
 
 def test_family_lens_weights_can_be_overridden_per_family():
-    # winter with observed 0.6 / modeled 0.2 / history 0.2: 0.6·50 + 0.2·30 + 0.2·100 = 56
-    cfg = CFG | {"families": CFG["families"] | {"winter": CFG["families"]["winter"] | {
-        "lens_weights": {"observed": 0.6, "modeled": 0.2, "history": 0.2}}}}
-    inputs = exposure.HubInputs(
-        daily=four_years_with_snow_days(10),
-        nri={"WNTW": {"pct": 30.0, "alrb": 0.001}, "HRCN": {"pct": 60.0, "alrb": 0.01}},
-        declarations=[decl("Snowstorm", y) for y in (2001, 2005, 2010, 2020)],
-    )
-    winter = exposure.compute_exposure("x", inputs, cfg)["families"]["winter"]
-    assert winter["score"] == pytest.approx(56)
-    assert winter["lenses"]["observed"]["weight"] == 0.6
+    # winter 0.75 / 0.25: 0.75·50 + 0.25·30 = 45
+    cfg = with_lens_weights(CFG, "winter", 0.75, 0.25)
+    winter = exposure.compute_exposure("x", exposure.HubInputs(four_years_with_snow_days(10), NRI), cfg)["families"]["winter"]
+    assert winter["score"] == pytest.approx(45)
+    assert winter["lenses"]["observed"]["weight"] == 0.75
 
 
-def test_family_without_observed_lens_renormalizes():
-    # hurricane has no observed lens by design: (0.4·60 + 0.2·25) / 0.6 = 29/0.6 = 48.33
-    inputs = exposure.HubInputs(
-        daily=four_years_with_snow_days(0),
-        nri={"WNTW": {"pct": 0.0, "alrb": None}, "HRCN": {"pct": 60.0, "alrb": 0.01}},
-        declarations=[decl("Hurricane", 2008)],  # 1 of 4 → 25
-    )
-    hurricane = exposure.compute_exposure("x", inputs, CFG)["families"]["hurricane"]
-    assert hurricane["score"] == pytest.approx(48.33, abs=0.01)
+def test_family_without_observed_lens_uses_modeled_only():
+    hurricane = exposure.compute_exposure("x", exposure.HubInputs(four_years_with_snow_days(0), NRI), CFG)["families"]["hurricane"]
+    assert hurricane["score"] == 60
     assert hurricane["missing_lenses"] == []  # absent by design is not a data gap
 
 
-def test_failed_source_is_flagged_and_weights_renormalize():
-    # NRI unavailable → winter = (0.4·50 + 0.2·100) / 0.6 = 66.67, modeled lens reported missing
-    inputs = exposure.HubInputs(
-        daily=four_years_with_snow_days(10),
-        nri=None,
-        declarations=[decl("Snowstorm", y) for y in (2001, 2005, 2010, 2020)],
-    )
-    result = exposure.compute_exposure("x", inputs, CFG)
+def test_missing_nri_is_flagged_and_weights_renormalize():
+    # NRI unavailable → winter = observed only = 50; modeled lens reported missing; hurricane has no evidence
+    result = exposure.compute_exposure("x", exposure.HubInputs(four_years_with_snow_days(10), None), CFG)
     winter = result["families"]["winter"]
-    assert winter["score"] == pytest.approx(66.67, abs=0.01)
+    assert winter["score"] == pytest.approx(50)
     assert winter["missing_lenses"] == ["modeled"]
-    assert winter["missing_weight_share"] == pytest.approx(0.4)
+    assert winter["missing_weight_share"] == pytest.approx(0.5)
+    assert result["families"]["hurricane"]["score"] is None
     assert any("FEMA National Risk Index" in gap for gap in result["data_gaps"])
+    assert result["score"] == pytest.approx(50)  # overall over the families that have evidence
 
 
-def test_declarations_before_window_are_ignored():
-    cfg = CFG | {"declarations_since": date(2010, 1, 1)}
-    inputs = exposure.HubInputs(daily=four_years_with_snow_days(0), nri={"WNTW": {"pct": 0, "alrb": None},
-                                "HRCN": {"pct": 0, "alrb": None}},
-                                declarations=[decl("Hurricane", 2005), decl("Hurricane", 2017)])
-    history = exposure.compute_exposure("x", inputs, cfg)["families"]["hurricane"]["lenses"]["history"]
-    assert history["indicators"][0]["raw"] == 1  # only the 2017 one
+def test_missing_weather_is_flagged():
+    result = exposure.compute_exposure("x", exposure.HubInputs([], NRI), CFG)
+    assert result["families"]["winter"]["missing_lenses"] == ["observed"]
+    assert any("Open-Meteo" in gap for gap in result["data_gaps"])
 
 
 def test_overall_is_equal_weight_mean_and_names_top_family():
-    # winter 52, hurricane 48.33 → overall (52 + 48.33)/2 = 50.17; top family = winter
-    inputs = exposure.HubInputs(
-        daily=four_years_with_snow_days(10),
-        nri={"WNTW": {"pct": 30.0, "alrb": 0.001}, "HRCN": {"pct": 60.0, "alrb": 0.01}},
-        declarations=[decl("Snowstorm", y) for y in (2001, 2005, 2010, 2020)] + [decl("Hurricane", 2008)],
-    )
-    result = exposure.compute_exposure("x", inputs, CFG)
-    assert result["score"] == pytest.approx(50.17, abs=0.01)
-    assert result["top_family"] == "winter"
-    # contribution of each family = score × weight / Σweights
-    assert result["families"]["winter"]["contribution"] == pytest.approx(26.0)
+    # winter 40, hurricane 60 → overall 50; contribution of winter = 40 × 1/2 = 20; top family hurricane
+    result = exposure.compute_exposure("x", exposure.HubInputs(four_years_with_snow_days(10), NRI), CFG)
+    assert result["score"] == pytest.approx(50)
+    assert result["families"]["winter"]["contribution"] == pytest.approx(20)
+    assert result["top_family"] == "hurricane"
 
 
 def test_rescore_with_weight_override():
-    # weight hurricane ×3: (52·1 + 48.33·3) / 4 = 49.25
-    breakdown = {"families": {"winter": {"score": 52.0}, "hurricane": {"score": 48.33}}}
-    assert exposure.overall_score(breakdown, {"winter": 1, "hurricane": 3}) == pytest.approx(49.25, abs=0.01)
+    # hurricane ×3: (40·1 + 60·3) / 4 = 55
+    breakdown = {"families": {"winter": {"score": 40.0}, "hurricane": {"score": 60.0}}}
+    assert exposure.overall_score(breakdown, {"winter": 1, "hurricane": 3}) == pytest.approx(55)
 
 
 def test_modeled_combine_max():
-    cfg = {**CFG, "families": {"flood": {"label": "Flood", "observed": [],
-                                         "modeled": {"nri": ["IFLD", "CFLD"], "combine": "max"}, "history": None}},
-           "family_weights": {"flood": 1}, "nri_hazard_names": {"IFLD": "Inland", "CFLD": "Coastal"}}
-    inputs = exposure.HubInputs(daily=[], nri={"IFLD": {"pct": 40, "alrb": 1}, "CFLD": {"pct": 70, "alrb": 1}},
-                                declarations=[])
-    assert exposure.compute_exposure("x", inputs, cfg)["families"]["flood"]["score"] == 70
-
-
-# -- near-term ----------------------------------------------------------------
-
-NT_CFG = {
-    "forecast": {
-        "winter": [{"variable": "snowfall_cm", "label": "Daily snowfall (cm)", "points": [[0, 0], [2.5, 40], [15, 80], [30, 100]]}],
-        "heat": [{"variable": "tmax_c", "label": "Daily maximum temp (°C)", "points": [[30, 0], [35, 30], [40, 70], [43, 100]]}],
-    },
-    "nws_severity": {"Extreme": 100, "Severe": 80, "Moderate": 50, "Minor": 25, "Unknown": 25},
-    "nws_events": {"hurricane": ["Hurricane"], "winter": ["Winter", "Snow"], "heat": ["Heat"]},
-    "bands": [{"min": 0, "band": "Low"}, {"min": 25, "band": "Guarded"}, {"min": 50, "band": "Elevated"}, {"min": 75, "band": "Severe"}],
-}
-
-
-def forecast(snow: list[float], tmax: list[float]) -> list[dict]:
-    return [{"date": f"2026-10-0{i + 1}", "snowfall_cm": s, "tmax_c": t} for i, (s, t) in enumerate(zip(snow, tmax))]
-
-
-def test_near_term_takes_worst_forecast_day_per_family():
-    # worst snow day 8.75 cm → 60; worst heat day 37.5 °C → 50 (midpoint of 30 and 70); overall = max = 60
-    result = near_term.compute_near_term(forecast([0, 8.75, 1], [20, 37.5, 25]), [], NT_CFG)
-    assert result["families"]["winter"]["score"] == pytest.approx(60)
-    assert result["families"]["heat"]["score"] == pytest.approx(50)
-    assert result["score"] == pytest.approx(60)
-    assert result["band"] == "Elevated"
-    assert result["top_family"] == "winter"
-    assert "2026-10-02" in result["families"]["winter"]["drivers"][0]
-
-
-def test_nws_alert_overrides_quiet_forecast():
-    # Winter Storm Warning, Severe → 80 → band Severe; hurricane alert, Moderate → 50
-    alerts = [
-        {"event": "Winter Storm Warning", "severity": "Severe", "urgency": "Expected", "certainty": "Likely", "onset": None, "expires": "2026-10-03T00:00:00-05:00"},
-        {"event": "Hurricane Watch", "severity": "Moderate", "urgency": "Future", "certainty": "Possible", "onset": None, "expires": None},
-        {"event": "Air Quality Alert", "severity": "Minor", "urgency": "Expected", "certainty": "Likely", "onset": None, "expires": None},
-    ]
-    result = near_term.compute_near_term(forecast([0, 0], [20, 20]), alerts, NT_CFG)
-    assert result["families"]["winter"]["score"] == 80
-    assert result["families"]["hurricane"]["score"] == 50
-    assert result["band"] == "Severe"
-    assert any("Air Quality Alert" in note for note in result["unmapped_alerts"])
-
-
-def test_nws_alert_scaled_by_certainty():
-    # Flood Watch, Severe (80) but only "Possible" (×0.7) → 56 → Elevated, not Severe
-    cfg = NT_CFG | {"nws_events": NT_CFG["nws_events"] | {"flood": ["Flood"]},
-                    "nws_certainty": {"Observed": 1.0, "Likely": 1.0, "Possible": 0.7, "Unlikely": 0.4, "Unknown": 0.7}}
-    alert = {"event": "Flood Watch", "severity": "Severe", "urgency": "Future", "certainty": "Possible",
-             "onset": None, "expires": None}
-    result = near_term.compute_near_term([], [alert], cfg)
-    assert result["families"]["flood"]["score"] == pytest.approx(56)
-    assert result["band"] == "Elevated"
-
-
-def test_band_boundaries():
-    bands = NT_CFG["bands"]
-    assert near_term.band_for(24.9, bands) == "Low"
-    assert near_term.band_for(25, bands) == "Guarded"
-    assert near_term.band_for(75, bands) == "Severe"
+    cfg = ScoringConfig.model_validate(CFG.model_dump() | {
+        "family_weights": {"flood": 1}, "nri_hazard_names": {"IFLD": "Inland", "CFLD": "Coastal"},
+        "families": {"flood": {"label": "Flood", "observed": [], "modeled": {"nri": ["IFLD", "CFLD"], "combine": "max"}}},
+    })
+    nri = {"IFLD": {"pct": 40, "alrb": 1}, "CFLD": {"pct": 70, "alrb": 1}}
+    assert exposure.compute_exposure("x", exposure.HubInputs([], nri), cfg)["families"]["flood"]["score"] == 70
 
 
 # -- ranking robustness -------------------------------------------------------
@@ -245,19 +153,19 @@ def test_rank_stability_detects_fragile_first_place():
     # Two families with one lens each. A: x=80, y=40 → 60. B: x=40, y=78 → 59.
     # x weight ×1.25: A 62.2 / B 56.9 (A first)   x ×0.75: A 57.1 / B 61.7 (B first)
     # y weight ×1.25: A 57.8 / B 61.1 (B first)   y ×0.75: A 62.9 / B 56.3 (A first)
-    # 3 lens-weight scenarios ×2 cannot change anything (one lens per family) → 10 scenarios, top-1 holds in 8.
+    # 2 lens-weight scenarios ×2 cannot change anything (one lens per family) → 8 scenarios, top-1 holds in 6.
     def bd(x, y):
-        lens = lambda s: {"score": s, "lenses": {"modeled": {"score": s, "weight": 0.4}}, "missing_lenses": []}
+        lens = lambda s: {"score": s, "lenses": {"modeled": {"score": s, "weight": 0.5}}, "missing_lenses": []}
         return {"families": {"x": lens(x), "y": lens(y)}}
 
     breakdowns = {"A": bd(80, 40), "B": bd(40, 78), "C": bd(10, 10)}
     result = robustness.rank_stability(
         breakdowns, families=["x", "y"], family_weights={"x": 1, "y": 1},
-        lenses=("observed", "modeled", "history"), perturbation=0.25, top_k=2,
+        lenses=("observed", "modeled"), perturbation=0.25, top_k=2,
     )
-    assert result["scenarios"] == 10
-    assert result["top1_unchanged"] == 8
-    assert result["topk_unchanged"] == 10  # {A, B} stays the top-2 set
+    assert result["scenarios"] == 8
+    assert result["top1_unchanged"] == 6
+    assert result["topk_unchanged"] == 8  # {A, B} stays the top-2 set
     assert result["baseline"][:2] == ["A", "B"]
 
 

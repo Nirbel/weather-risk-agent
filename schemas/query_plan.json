@@ -2,13 +2,12 @@
   "additionalProperties": false,
   "properties": {
     "intent": {
-      "description": "rank hubs, compare hubs, stat (% of days), explain one hub's score, outlook (next 7 days), clarify, or out_of_scope",
+      "description": "rank hubs, compare hubs, stat (% of past days), explain one hub's score, clarify, or out_of_scope",
       "enum": [
         "rank",
         "compare",
         "stat",
         "explain",
-        "outlook",
         "clarify",
         "out_of_scope"
       ],
@@ -20,20 +19,15 @@
           "items": {
             "enum": [
               "chicago",
-              "indianapolis",
-              "columbus",
-              "detroit",
               "minneapolis",
+              "detroit",
               "kansas_city",
-              "st_louis",
               "denver",
               "dallas",
               "houston",
               "miami",
               "atlanta",
-              "memphis",
-              "newark",
-              "los_angeles"
+              "newark"
             ],
             "type": "string"
           },
@@ -82,14 +76,6 @@
         }
       ],
       "description": "Hazard families to focus on, or null for all"
-    },
-    "horizon": {
-      "description": "long_term exposure (investment) or next_7_days (near-term risk)",
-      "enum": [
-        "long_term",
-        "next_7_days"
-      ],
-      "type": "string"
     },
     "metric": {
       "anyOf": [
@@ -281,7 +267,6 @@
     "hubs",
     "region",
     "hazards",
-    "horizon",
     "metric",
     "top_k",
     "time_preset",
