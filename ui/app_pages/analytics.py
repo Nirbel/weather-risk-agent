@@ -146,3 +146,93 @@ if explained:
             st.markdown(f"- {point}")
         if explained["uncertainty"]["level"] != "low":
             st.caption("Data notes: " + " ".join(explained["uncertainty"]["reasons"]))
+
+
+# -- score-change alerts (bonus) --------------------------------------------------------
+STATUS = {"baseline": "Baseline recorded; later checks compare against it.",
+          "no_changes": "No hub moved by at least the threshold."}
+
+
+def when(ts: str | None) -> str:
+    return f"{ts[:16].replace('T', ' ')} UTC" if ts else "never"
+
+
+def act(method: str, path: str, **kwargs) -> dict | None:
+    """Call an admin endpoint; on failure leave an error note and return None."""
+    response = api_client.request(method, path, **kwargs)
+    if response is not None and response.status_code == 200:
+        return response.json()
+    if response is not None:
+        st.session_state.alert_note = ("error", response.json().get("detail", response.text))
+    return None
+
+
+@st.fragment
+def alerts_section() -> None:
+    st.subheader("Score-change alerts", anchor=False)
+    st.caption("A scheduled check compares each hub's overall exposure score with the last value analysts were "
+               "told about, and posts changes of at least the threshold to a webhook. Scores move when the 5-year "
+               "window rolls over each January, when FEMA publishes a new NRI release, or when the scoring "
+               "config changes. Hubs with data gaps are skipped, so a failed fetch never looks like a change.")
+    if note := st.session_state.pop("alert_note", None):
+        getattr(st, note[0])(note[1], icon=":material/notifications:")
+    response = api_client.request("GET", "/alerts")
+    if response is None or response.status_code != 200:
+        st.error("Alerts are unavailable right now.", icon=":material/error:")
+        return
+    feed = response.json()
+    every = feed["check_every_hours"]
+    with st.container(horizontal=True):
+        st.metric("Last check", when(feed["last_check"]), border=True,
+                  help=f"Runs every {every:g} h in the API process." if every else "The scheduler is off.")
+        st.metric("Threshold", f"{feed['threshold']:g} points", border=True)
+        st.metric("Webhook delivery", "On" if feed["delivering"] else "Off", border=True)
+    if feed["alerts"]:
+        st.dataframe(pd.DataFrame(feed["alerts"])[["created_at", "hub", "old_score", "new_score", "delta", "delivery"]],
+                     hide_index=True, column_config={
+                         "created_at": st.column_config.DatetimeColumn("When", format="YYYY-MM-DD HH:mm"),
+                         "hub": "Hub", "old_score": st.column_config.NumberColumn("Was", format="%.1f"),
+                         "new_score": st.column_config.NumberColumn("Now", format="%.1f"),
+                         "delta": st.column_config.NumberColumn("Change", format="%+.1f"), "delivery": "Webhook"})
+    else:
+        st.info("No score changes yet. The first check records the baseline.", icon=":material/notifications:")
+
+    if st.session_state.get("role") != "admin":
+        return
+    cfg = act("GET", "/alerts/settings")
+    if cfg is None:
+        return
+    with st.expander("Alert settings (admin)", icon=":material/settings:"):
+        with st.form("alert_settings", border=False):
+            url = st.text_input("Webhook URL", value=cfg["webhook_url"] or "", placeholder="https://…",
+                                help="Any endpoint that accepts a JSON POST. The payload carries a `text` "
+                                     "summary, so a Slack incoming webhook works as-is.")
+            enabled = st.toggle("Send alerts to the webhook", value=cfg["enabled"])
+            threshold = st.number_input("Threshold (points on the 0–100 overall score)", min_value=0.5,
+                                        max_value=100.0, value=float(cfg["threshold"]), step=0.5)
+            if st.form_submit_button("Save", icon=":material/save:", type="primary"):
+                if act("PUT", "/alerts/settings",
+                       json={"webhook_url": url or None, "enabled": enabled, "threshold": threshold}):
+                    st.session_state.alert_note = ("success", "Alert settings saved.")
+                st.rerun(scope="fragment")
+        if cfg["updated_by"]:
+            st.caption(f"Last changed by {cfg['updated_by']} at {when(cfg['updated_at'])}.")
+        with st.container(horizontal=True):
+            if st.button("Send test", icon=":material/send:", help="Posts a sample payload to the saved URL."):
+                if body := act("POST", "/alerts/test"):
+                    st.session_state.alert_note = ("success" if body["ok"] else "error",
+                                                   f"Test webhook: {body['delivery']}.")
+                st.rerun(scope="fragment")
+            if st.button("Check now", icon=":material/refresh:", help="Run the score-change check immediately."):
+                with st.spinner("Scoring all hubs and comparing with the baseline…"):
+                    body = act("POST", "/alerts/run")
+                if body:
+                    text = STATUS.get(body["status"]) or f"{len(body['changes'])} change(s); webhook: {body['delivery']}."
+                    if body["skipped"]:
+                        names = {hub_id: name for name, hub_id in hub_ids.items()}
+                        text += " Skipped (data gaps): " + ", ".join(names.get(h, h) for h in body["skipped"]) + "."
+                    st.session_state.alert_note = ("warning" if body["skipped"] else "success", text)
+                st.rerun(scope="fragment")
+
+
+alerts_section()

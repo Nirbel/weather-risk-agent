@@ -94,6 +94,38 @@ class Turn(Base):
     answer: Mapped[Any] = mapped_column(JSON)
 
 
+class ScoreSnapshot(Base):
+    """The alert baseline: each hub's overall score as analysts were last told it."""
+
+    __tablename__ = "score_snapshots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    scores: Mapped[Any] = mapped_column(JSON)  # hub_id → overall score
+
+
+class Alert(Base):
+    __tablename__ = "alerts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    hub_id: Mapped[str] = mapped_column(String)
+    old_score: Mapped[float] = mapped_column(Float)
+    new_score: Mapped[float] = mapped_column(Float)
+    delta: Mapped[float] = mapped_column(Float)
+    delivery: Mapped[str] = mapped_column(String)
+
+
+class AlertSettings(Base):
+    """Single row (id 1), edited by an admin in the UI. Absent → env defaults."""
+
+    __tablename__ = "alert_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    webhook_url: Mapped[str | None] = mapped_column(String)
+    enabled: Mapped[bool] = mapped_column(Boolean)
+    threshold: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_by: Mapped[str] = mapped_column(String)
+
+
 class Database:
     def __init__(self, url: str):
         memory = ":memory:" in url
@@ -233,6 +265,40 @@ class Database:
                 .order_by(Conversation.updated_at.desc()).limit(limit)
             )
             return [{"id": c.id, "title": c.title, "updated_at": iso(c.updated_at), "turns": n or 0} for c, n in rows]
+
+    # -- alerts -----------------------------------------------------------------------
+    async def latest_snapshot(self) -> dict | None:
+        async with self._read() as s:
+            snap = await s.scalar(select(ScoreSnapshot).order_by(ScoreSnapshot.id.desc()).limit(1))
+            return {"taken_at": iso(snap.taken_at), "scores": snap.scores} if snap else None
+
+    async def add_snapshot(self, scores: dict[str, float]) -> None:
+        async with self._tx() as s:
+            s.add(ScoreSnapshot(taken_at=utcnow(), scores=scores))
+
+    async def add_alerts(self, rows: list[dict], delivery: str) -> None:
+        now = utcnow()
+        async with self._tx() as s:
+            s.add_all(Alert(created_at=now, delivery=delivery, **row) for row in rows)
+
+    async def recent_alerts(self, limit: int = 50) -> list[dict]:
+        async with self._read() as s:
+            alerts = await s.scalars(select(Alert).order_by(Alert.id.desc()).limit(limit))
+            return [{"created_at": iso(a.created_at), "hub_id": a.hub_id, "old_score": a.old_score,
+                     "new_score": a.new_score, "delta": a.delta, "delivery": a.delivery} for a in alerts]
+
+    async def alert_settings(self) -> dict | None:
+        async with self._read() as s:
+            row = await s.get(AlertSettings, 1)
+            return None if row is None else {
+                "webhook_url": row.webhook_url, "enabled": row.enabled, "threshold": row.threshold,
+                "updated_at": iso(row.updated_at), "updated_by": row.updated_by}
+
+    async def save_alert_settings(self, *, webhook_url: str | None, enabled: bool, threshold: float,
+                                  updated_by: str) -> None:
+        async with self._tx() as s:
+            await s.merge(AlertSettings(id=1, webhook_url=webhook_url, enabled=enabled, threshold=threshold,
+                                        updated_at=utcnow(), updated_by=updated_by))
 
 
 def _turn(t: Turn) -> dict:

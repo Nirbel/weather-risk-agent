@@ -31,11 +31,12 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-only-change-me-and-use-at-least-32-bytes"
     token_ttl_hours: int = 12
 
-    # Alerts
+    # Score-change alerts (defaults; an admin can change URL, enabled flag and threshold in the UI)
     scheduler_enabled: bool = True
-    near_term_refresh_minutes: int = 60
+    alert_check_hours: float = 24.0
+    alert_threshold: float = 5.0  # points on the 0–100 overall Exposure Score
     alert_webhook_url: str | None = None
-    alert_trigger_secret: str | None = None  # header X-Alert-Secret for POST /alerts/run
+    alert_trigger_secret: str | None = None  # header X-Alert-Secret for POST /alerts/run (external cron)
 
     # UI → API
     api_url: str = "http://localhost:8000"
@@ -53,3 +54,9 @@ def get_settings() -> Settings:
 
 def llm_configured(settings: Settings) -> bool:
     return bool(settings.groq_api_key or settings.gemini_api_key)
+
+
+def voice_configured(settings: Settings) -> bool:
+    """Voice input needs a key for the transcription model's provider (Groq Whisper by default)."""
+    provider = settings.transcribe_model.split("/", 1)[0]
+    return bool({"groq": settings.groq_api_key, "gemini": settings.gemini_api_key}.get(provider))

@@ -16,6 +16,7 @@ dependencies = [
     "pyyaml>=6.0",
     "sqlalchemy[asyncio]>=2.0.40",
     "aiosqlite>=0.21",
+    "python-multipart>=0.0.20",
 ]
 
 [dependency-groups]

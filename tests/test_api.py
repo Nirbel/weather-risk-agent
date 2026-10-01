@@ -1,18 +1,23 @@
 """API routes and auth with a fake Analyzer and a fake LLM (no network, no keys)."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
+import respx
 from fastapi.testclient import TestClient
 
-from conftest import FakeAnalyzer, FakeCompletion
+from conftest import SYNTHETIC_SCORES, FakeAnalyzer, FakeCompletion
 from weather_risk.api.auth import parse_allowlist
 from weather_risk.api.main import create_app
 from weather_risk.db import Database
 from weather_risk.settings import Settings
 
+HOOK = "https://hooks.example.com/weather"
 SETTINGS = Settings(auth_allowlist="ana@example.com:analyst, boss@example.com:admin, bob@example.com",
-                    jwt_secret="test-secret-that-is-at-least-32-bytes-long", groq_api_key="x")
+                    jwt_secret="test-secret-that-is-at-least-32-bytes-long", groq_api_key="x",
+                    scheduler_enabled=False, alert_webhook_url=HOOK, alert_threshold=5.0,
+                    alert_trigger_secret="cron-secret")
 
 PLAN = json.dumps({"intent": "rank", "hubs": None, "region": "midwest", "hazards": ["winter"], "metric": None,
                    "top_k": 3, "time_preset": None, "year": None, "start_date": None, "end_date": None,
@@ -22,11 +27,22 @@ EXPLANATION = json.dumps({"summary": "Minneapolis–St Paul ranks first (90).", 
                           "suggested_follow_ups": []})
 
 
+class FakeTranscription:
+    def __init__(self, text: str = "Why is Dallas high?", error: Exception | None = None):
+        self.text, self.error, self.calls = text, error, []
+
+    async def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return SimpleNamespace(text=f"  {self.text} ")
+
+
 @pytest.fixture
 def make_client():
-    def factory(*outcomes, settings=SETTINGS):
+    def factory(*outcomes, settings=SETTINGS, transcription=None):
         app = create_app(settings, db=Database("sqlite+aiosqlite:///:memory:"), analyzer=FakeAnalyzer(),
-                         completion=FakeCompletion(*outcomes))
+                         completion=FakeCompletion(*outcomes), transcription=transcription or FakeTranscription())
         return TestClient(app)
     return factory
 
@@ -133,3 +149,77 @@ def test_health(make_client):
         body = client.get("/health").json()
     assert body["status"] == "ok" and body["hubs"] == 10 and body["llm_configured"]
     assert body["exposure_window"]["start"] == "2021-01-01"
+    assert body["voice"] is True
+
+
+# -- alerts (bonus) ----------------------------------------------------------------
+
+def test_alert_settings_are_admin_only_and_validated(make_client):
+    with make_client() as client:
+        analyst, admin = auth(client), auth(client, "boss@example.com")
+        assert client.get("/alerts/settings", headers=analyst).status_code == 403
+        assert client.get("/alerts/settings", headers=admin).json()["webhook_url"] == HOOK  # env default
+        bad = client.put("/alerts/settings", headers=admin,
+                         json={"webhook_url": "ftp://x", "enabled": True, "threshold": 5})
+        assert bad.status_code == 422
+        saved = client.put("/alerts/settings", headers=admin,
+                           json={"webhook_url": "https://example.org/hook", "enabled": False, "threshold": 2.5}).json()
+    assert saved["webhook_url"] == "https://example.org/hook" and saved["threshold"] == 2.5
+    assert saved["enabled"] is False and saved["updated_by"] == "boss@example.com"
+
+
+def test_alert_run_needs_admin_or_the_trigger_secret(make_client):
+    with make_client() as client:
+        assert client.post("/alerts/run", headers=auth(client)).status_code == 403
+        assert client.post("/alerts/run", headers={"X-Alert-Secret": "wrong"}).status_code == 401
+        first = client.post("/alerts/run", headers={"X-Alert-Secret": "cron-secret"}).json()
+        second = client.post("/alerts/run", headers=auth(client, "boss@example.com")).json()
+    assert first["status"] == "baseline" and second["status"] == "no_changes"
+
+
+def test_score_change_alerts_the_webhook_and_the_feed(make_client, monkeypatch):
+    with respx.mock(assert_all_called=False) as router, make_client() as client:
+        hook = router.post(HOOK).respond(200)
+        admin = auth(client, "boss@example.com")
+        client.post("/alerts/run", headers=admin)
+        # Miami winter 10 → 60: overall (85+60+10+10+10)/5 = 35.0 → (85+60+60+10+10)/5 = 45.0
+        monkeypatch.setitem(SYNTHETIC_SCORES, "miami", {"hurricane": 85, "flood": 60, "winter": 60})
+        result = client.post("/alerts/run", headers=admin).json()
+        feed = client.get("/alerts", headers=auth(client)).json()
+    assert result["delivery"] == "sent" and hook.call_count == 1
+    assert [(c["hub"], c["old_score"], c["new_score"], c["delta"]) for c in result["changes"]] == [
+        ("Miami", 35.0, 45.0, 10.0)]
+    assert feed["alerts"][0]["hub"] == "Miami" and feed["last_check"] and feed["delivering"]
+
+
+def test_test_webhook_reports_delivery(make_client):
+    with respx.mock() as router, make_client() as client:
+        router.post(HOOK).respond(500)
+        body = client.post("/alerts/test", headers=auth(client, "boss@example.com")).json()
+    assert body == {"ok": False, "delivery": "failed: HTTP 500"}
+
+
+# -- voice (bonus) ---------------------------------------------------------------------
+
+def test_transcribe_returns_text(make_client):
+    fake = FakeTranscription()
+    with make_client(transcription=fake) as client:
+        response = client.post("/transcribe", headers=auth(client),
+                               files={"audio": ("question.wav", b"RIFF....WAVE", "audio/wav")})
+    assert response.json() == {"text": "Why is Dallas high?"}
+    assert fake.calls[0]["model"] == SETTINGS.transcribe_model and fake.calls[0]["file"][0] == "question.wav"
+
+
+def test_transcribe_errors_are_clear(make_client):
+    with make_client(transcription=FakeTranscription(error=RuntimeError("boom"))) as client:
+        headers = auth(client)
+        assert client.post("/transcribe", headers=headers,
+                           files={"audio": ("q.wav", b"", "audio/wav")}).status_code == 400
+        failed = client.post("/transcribe", headers=headers, files={"audio": ("q.wav", b"abc", "audio/wav")})
+    assert failed.status_code == 502 and "RuntimeError" in failed.json()["detail"]
+    no_key = SETTINGS.model_copy(update={"groq_api_key": None})
+    with make_client(settings=no_key) as client:
+        assert client.get("/health").json()["voice"] is False
+        assert client.post("/transcribe", headers=auth(client),
+                           files={"audio": ("q.wav", b"abc", "audio/wav")}).status_code == 503
+

@@ -4,11 +4,12 @@ An allow-listed email gets a signed bearer token carrying its role (analyst | ad
 There is no password: this identifies users for a demo, it does not authenticate them.
 """
 
+import hmac
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import jwt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -72,3 +73,12 @@ def require_admin(user: User = Depends(current_user)) -> User:
     if user.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required.")
     return user
+
+
+def require_admin_or_trigger_secret(request: Request, x_alert_secret: str | None = Header(None),
+                                    creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> str:
+    """POST /alerts/run: an admin token, or the shared secret an external cron or webhook sends."""
+    secret = request.app.state.settings.alert_trigger_secret
+    if secret and x_alert_secret and hmac.compare_digest(x_alert_secret.encode(), secret.encode()):
+        return "trigger-secret"
+    return require_admin(current_user(request, creds)).email

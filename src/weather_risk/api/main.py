@@ -3,21 +3,27 @@
     uv run python scripts/run.py        (API + UI)   ·   API docs at http://localhost:8000/docs
 """
 
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
+from weather_risk.agent import llm
 from weather_risk.agent.schemas import AgentAnswer, QueryPlan
 from weather_risk.agent.service import Agent, ConversationAccessError
+from weather_risk.alerts import AlertService, run_on_schedule
 from weather_risk.analysis import build_analyzer
-from weather_risk.api.auth import User, current_user, login, require_admin
+from weather_risk.api.auth import User, current_user, login, require_admin, require_admin_or_trigger_secret
 from weather_risk.config import load_hubs, load_scoring_config, validate_config
 from weather_risk.db import Database
 from weather_risk.scoring.exposure import overall_score
-from weather_risk.settings import Settings, get_settings, llm_configured
+from weather_risk.settings import Settings, get_settings, llm_configured, voice_configured
 from weather_risk.sources.http import make_client
+
+MAX_AUDIO_BYTES = 10 * 1024 * 1024
 
 log = logging.getLogger("weather_risk.api")
 
@@ -37,6 +43,12 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None
 
 
+class AlertSettingsRequest(BaseModel):
+    webhook_url: str | None = Field(default=None, max_length=2000)
+    enabled: bool
+    threshold: float = Field(gt=0, le=100, description="Points on the 0–100 overall Exposure Score")
+
+
 def _explain_plan(hub_id: str) -> QueryPlan:
     return QueryPlan.model_validate({
         "intent": "explain", "hubs": [hub_id], "region": None, "hazards": None, "metric": None, "top_k": None,
@@ -46,8 +58,8 @@ def _explain_plan(hub_id: str) -> QueryPlan:
 
 
 def create_app(settings: Settings | None = None, *, db: Database | None = None, analyzer=None,
-               completion=None) -> FastAPI:
-    """App factory. Tests inject a database, a (fake) analyzer and a fake LLM completion."""
+               completion=None, transcription=None) -> FastAPI:
+    """App factory. Tests inject a database, a (fake) analyzer and fake LLM completion/transcription."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -55,18 +67,21 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
         app.state.settings = settings or get_settings()
         app.state.db = db or Database(app.state.settings.database_url)
         await app.state.db.create_all()
-        client = None
-        if analyzer is None:
-            client = make_client(app.state.settings.contact_email)
-            app.state.analyzer = build_analyzer(app.state.db, client)
-        else:
-            app.state.analyzer = analyzer
+        client = make_client(app.state.settings.contact_email)
+        app.state.analyzer = analyzer or build_analyzer(app.state.db, client)
         app.state.agent = Agent(app.state.db, app.state.analyzer, app.state.settings, completion=completion)
-        if app.state.settings.jwt_secret.startswith("dev-only"):
-            log.warning("JWT_SECRET is the development default — set it in .env.")
+        app.state.alerts = AlertService(app.state.db, app.state.analyzer, app.state.settings, client)
+        scheduler = None
+        if app.state.settings.scheduler_enabled:
+            scheduler = asyncio.create_task(run_on_schedule(app.state.alerts, app.state.settings.alert_check_hours))
+        if len(app.state.settings.jwt_secret.encode()) < 32:
+            log.warning("JWT_SECRET is shorter than 32 bytes — set a random one in .env.")
         yield
-        if client is not None:
-            await client.aclose()
+        if scheduler is not None:
+            scheduler.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await scheduler
+        await client.aclose()
         if db is None:
             await app.state.db.dispose()
 
@@ -86,6 +101,25 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
             return await request.app.state.agent.ask(body.message, body.conversation_id, user.email)
         except ConversationAccessError as exc:
             raise HTTPException(404, "Conversation not found") from exc
+
+    @app.post("/transcribe", tags=["agent"])
+    async def transcribe(audio: UploadFile, request: Request, user: User = Depends(current_user)):
+        """Voice input (bonus): speech → text via LiteLLM (Groq Whisper). The UI then sends the text to /chat."""
+        st = request.app.state.settings
+        if not voice_configured(st):
+            raise HTTPException(503, f"Voice input needs an API key for {st.transcribe_model}.")
+        data = await audio.read()
+        if not data:
+            raise HTTPException(400, "The recording is empty.")
+        if len(data) > MAX_AUDIO_BYTES:
+            raise HTTPException(413, "The recording is too long (10 MB max).")
+        try:
+            text = await llm.transcribe(data, audio.filename or "question.wav", model=st.transcribe_model,
+                                        transcription=transcription, timeout=st.llm_timeout_s)
+        except Exception as exc:
+            log.warning("transcription failed: %s", exc)
+            raise HTTPException(502, f"Transcription failed ({exc.__class__.__name__}).") from exc
+        return {"text": text}
 
     @app.get("/conversations", tags=["agent"])
     async def conversations(request: Request, user: User = Depends(current_user)):
@@ -138,6 +172,41 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
             raise HTTPException(404, f"Unknown hub {hub_id!r}")
         return await request.app.state.agent.answer_plan(_explain_plan(hub_id), f"Explain {hub_id}", use_llm=False)
 
+    # -- alerts (bonus): score changes → webhook ------------------------------------------
+    @app.get("/alerts", tags=["alerts"])
+    async def alerts(request: Request, user: User = Depends(current_user)):
+        """Recent score-change alerts and when the last check ran."""
+        db: Database = request.app.state.db
+        cfg = await request.app.state.alerts.config()
+        names = {h.id: h.name for h in load_hubs()}
+        snapshot = await db.latest_snapshot()
+        return {"last_check": snapshot["taken_at"] if snapshot else None, "threshold": cfg["threshold"],
+                "delivering": bool(cfg["enabled"] and cfg["webhook_url"]),
+                "check_every_hours": request.app.state.settings.alert_check_hours
+                if request.app.state.settings.scheduler_enabled else None,
+                "alerts": [a | {"hub": names.get(a["hub_id"], a["hub_id"])} for a in await db.recent_alerts()]}
+
+    @app.get("/alerts/settings", tags=["alerts"])
+    async def alert_settings(request: Request, user: User = Depends(require_admin)):
+        return await request.app.state.alerts.config()
+
+    @app.put("/alerts/settings", tags=["alerts"])
+    async def update_alert_settings(body: AlertSettingsRequest, request: Request, user: User = Depends(require_admin)):
+        try:
+            return await request.app.state.alerts.update_settings(**body.model_dump(), updated_by=user.email)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/alerts/test", tags=["alerts"])
+    async def test_alert(request: Request, user: User = Depends(require_admin)):
+        """Send a sample payload to the saved webhook URL."""
+        return await request.app.state.alerts.send_test()
+
+    @app.post("/alerts/run", tags=["alerts"])
+    async def run_alerts(request: Request, caller: str = Depends(require_admin_or_trigger_secret)):
+        """Check for score changes now. Admin token, or header X-Alert-Secret for an external cron."""
+        return await request.app.state.alerts.run()
+
     # -- ops ---------------------------------------------------------------------------
     @app.post("/admin/warm", status_code=202, tags=["admin"])
     async def admin_warm(request: Request, background: BackgroundTasks, user: User = Depends(require_admin)):
@@ -156,6 +225,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
         return {
             "status": "ok",
             "llm_configured": llm_configured(st.settings),
+            "voice": voice_configured(st.settings),
             "llm_models": [st.settings.llm_model, st.settings.llm_fallback_model],
             "exposure_window": {"start": start.isoformat(), "end": end.isoformat()},
             "hubs": len(load_hubs()),

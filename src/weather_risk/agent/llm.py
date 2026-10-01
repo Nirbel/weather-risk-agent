@@ -144,3 +144,14 @@ async def structured_call(
         raise
     finally:
         meta.latency_ms = int((time.perf_counter() - started) * 1000)
+
+
+async def transcribe(audio: bytes, filename: str, *, model: str, transcription: Callable[..., Awaitable[Any]] | None = None,
+                     timeout: float = 30.0) -> str:
+    """Speech → text for voice input (bonus). The text then goes through the normal chat turn."""
+    if transcription is None:
+        import litellm
+
+        transcription = litellm.atranscription
+    response = await transcription(model=model, file=(filename, audio), timeout=timeout)
+    return (response.text or "").strip()

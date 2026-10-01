@@ -27,6 +27,8 @@ with st.container(horizontal=True):
     st.metric("Hazard families", 5, border=True, help="Winter, hurricane, flood, severe storm, heat.")
 
 st.subheader("Try a question", anchor=False)
+if health.get("voice"):
+    st.caption(":material/mic: You can also ask by voice: use the microphone in the chat box.")
 with st.container(horizontal=True):
     for i, question in enumerate(EXAMPLES):
         if st.button(question, key=f"example-{i}", icon=":material/arrow_forward:"):
@@ -66,7 +68,8 @@ with right:
             "- **Hurricane and severe-storm scores rest on FEMA NRI alone** — reanalysis can't resolve "
             "hurricanes, tornadoes or hail.\n"
             "- **Thresholds and weights are judgment calls**, kept in config and shown in every answer.\n"
-            "- **Long-term exposure only** — no forecasts or live alerts in this version."
+            "- **Long-term exposure only** — no forecasts. Score-change alerts fire when the 5-year window rolls "
+            "over, FEMA publishes a new NRI release, or the scoring config changes, so they are rare by design."
         )
     with st.container(border=True):
         st.subheader(":material/fact_check: How to read an answer", anchor=False)
