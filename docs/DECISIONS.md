@@ -23,6 +23,7 @@ Each entry gives the decision, why it was made, and what was rejected. The evide
 | D17 | Pragmatic TDD for core logic | Process |
 | D18 | Identity-lite auth | Security |
 | D19 | Hub roster is an assumption | Scope |
+| D20 | Calibration after the first real-data run | KPI |
 
 ---
 
@@ -171,3 +172,18 @@ Each entry gives the decision, why it was made, and what was rejected. The evide
   - Named in the brief: Denver, Dallas, Houston, Miami
   - Others: Atlanta, Memphis, Newark, Los Angeles
 - **Why:** The brief gives no facility list. The roster covers the example questions, and Los Angeles serves as a low-exposure control. It lives in `config/hubs.yaml` and can be replaced.
+
+## D20 — Calibration after the first real-data run
+
+- **What the first run showed:** With the planned settings, Kansas City (34.2) and Memphis (36.8) outscored Minneapolis (32.0) on winter. Yet Minneapolis averages 22.6 days a year at or below −18 °C and 11.8 snow days, against Memphis's 0.1 and 1.2.
+- **Root causes, measured in the seed data:**
+  1. ERA5 smooths daily snowfall. The "≥ 15 cm in a day" indicator was 0 at every hub; Minneapolis's largest single day in 10 years was 14.9 cm. Annual totals also run roughly 25–30 % below station normals (Minneapolis 93 cm/yr vs ~130 cm; Chicago 75 vs ~97).
+  2. NRI building-loss rates measure structural damage. Winter and heat disrupt a hub through operations (closures, slow handling, labour safety), so the modeled lens pulled winter scores toward counties with a small building stock. Memphis's 4 ice-storm declarations also put its history lens at 100.
+- **Changes (all in `config/scoring.yaml`):**
+  - Winter and heat use lens weights observed 0.6 / modeled 0.2 / history 0.2. Flood keeps 0.4 / 0.4 / 0.2.
+  - Heavy snow becomes ≥ 10 cm/day, with 1.5 days a year scoring 100.
+  - Snow days (≥ 2.5 cm) score 100 at 15 days a year.
+  - NWS alert score = severity × certainty, with "Possible" counting ×0.7. Three "Severe, Possible" Flood Watches had been scoring as Severe.
+- **Result:** Midwest winter order is now Minneapolis 59.3, Chicago 43.1, Detroit 36.8, Kansas City 36.0, St. Louis 26.7, Indianapolis 21.5, Columbus 19.1.
+- **Risk acknowledged:** Calibrating after seeing results can bake in expectations. Each change is tied to a measured property of the data, not to a target ranking. All values stay in config, and the ranking sensitivity test reports how fragile any order is.
+

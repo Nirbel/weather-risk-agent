@@ -1,0 +1,22 @@
+# Hub roster — an ASSUMPTION (the brief gives no facility list).
+# Each hub sits at its metro's main airport logistics zone.
+# county_fips was resolved once from (lat, lon) via the FCC Area API
+# (https://geo.fcc.gov/api/census/area) on 2026-10-01; it is not a runtime dependency.
+# region = US Census Bureau region of the state.
+
+hubs:
+  - {id: chicago,      name: Chicago,              state: IL, region: midwest,   lat: 41.9786, lon: -87.9048,  county_fips: "17031", county: Cook County}
+  - {id: indianapolis, name: Indianapolis,         state: IN, region: midwest,   lat: 39.7173, lon: -86.2944,  county_fips: "18097", county: Marion County}
+  - {id: columbus,     name: Columbus,             state: OH, region: midwest,   lat: 39.9980, lon: -82.8919,  county_fips: "39049", county: Franklin County}
+  - {id: detroit,      name: Detroit,              state: MI, region: midwest,   lat: 42.2124, lon: -83.3534,  county_fips: "26163", county: Wayne County}
+  - {id: minneapolis,  name: Minneapolis–St Paul,  state: MN, region: midwest,   lat: 44.8848, lon: -93.2223,  county_fips: "27053", county: Hennepin County}
+  - {id: kansas_city,  name: Kansas City,          state: MO, region: midwest,   lat: 39.2976, lon: -94.7139,  county_fips: "29165", county: Platte County}
+  - {id: st_louis,     name: St. Louis,            state: MO, region: midwest,   lat: 38.7487, lon: -90.3700,  county_fips: "29189", county: St. Louis County}
+  - {id: denver,       name: Denver,               state: CO, region: west,      lat: 39.8561, lon: -104.6737, county_fips: "08031", county: Denver County}
+  - {id: dallas,       name: Dallas,               state: TX, region: south,     lat: 32.8471, lon: -96.8518,  county_fips: "48113", county: Dallas County}
+  - {id: houston,      name: Houston,              state: TX, region: south,     lat: 29.9902, lon: -95.3368,  county_fips: "48201", county: Harris County}
+  - {id: miami,        name: Miami,                state: FL, region: south,     lat: 25.7959, lon: -80.2870,  county_fips: "12086", county: Miami-Dade County}
+  - {id: atlanta,      name: Atlanta,              state: GA, region: south,     lat: 33.6407, lon: -84.4277,  county_fips: "13063", county: Clayton County}
+  - {id: memphis,      name: Memphis,              state: TN, region: south,     lat: 35.0424, lon: -89.9767,  county_fips: "47157", county: Shelby County}
+  - {id: newark,       name: Newark,               state: NJ, region: northeast, lat: 40.6895, lon: -74.1745,  county_fips: "34013", county: Essex County}
+  - {id: los_angeles,  name: Los Angeles,          state: CA, region: west,      lat: 33.9416, lon: -118.4085, county_fips: "06037", county: Los Angeles County}

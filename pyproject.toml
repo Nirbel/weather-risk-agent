@@ -1,0 +1,35 @@
+[project]
+name = "weather-risk-agent"
+version = "0.1.0"
+description = "Chat agent that ranks, compares and explains weather-disruption exposure of US logistics hubs"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.142",
+    "uvicorn[standard]>=0.54",
+    "pydantic>=2.13",
+    "pydantic-settings>=2.6",
+    "httpx>=0.28",
+    # 1.82.7 and 1.82.8 were malicious PyPI releases (2026-03-24); pinned exactly, hashes in uv.lock.
+    "litellm==1.103.2",
+    "streamlit>=1.64",
+    "pyjwt>=2.10",
+    "pyyaml>=6.0",
+    "apscheduler>=3.11,<4",
+    "python-multipart>=0.0.20",
+]
+
+[dependency-groups]
+dev = ["pytest>=9", "pytest-asyncio>=1.4", "respx>=0.23"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/weather_risk"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]

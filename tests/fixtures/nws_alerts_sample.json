@@ -1,0 +1,38 @@
+{
+  "type": "FeatureCollection",
+  "title": "Current watches, warnings, and advisories",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "urn:oid:2.49.0.1.840.0.a8cfb18a6949091853cdfd100c84293d188177a6.001.1",
+        "event": "Flood Advisory",
+        "severity": "Minor",
+        "urgency": "Expected",
+        "certainty": "Likely",
+        "onset": "2026-10-01T09:30:00-05:00",
+        "expires": "2026-10-01T12:30:00-05:00",
+        "status": "Actual",
+        "messageType": "Alert",
+        "headline": "Flood Advisory issued October 1 at 9:30AM CDT until October 1 at 12:30PM CDT by NWS Topeka KS",
+        "areaDesc": "Geary, KS; Morris, KS"
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "urn:oid:2.49.0.1.840.0.f267b72b2b9d39820092ccc5932d9a6acc03226d.001.1",
+        "event": "Special Marine Warning",
+        "severity": "Severe",
+        "urgency": "Immediate",
+        "certainty": "Likely",
+        "onset": "2026-10-01T10:29:00-04:00",
+        "expires": "2026-10-01T11:30:00-04:00",
+        "status": "Actual",
+        "messageType": "Alert",
+        "headline": "Special Marine Warning issued October 1 at 10:29AM EDT until October 1 at 11:30AM EDT by NWS Miami FL",
+        "areaDesc": "Biscayne Bay; Coastal waters from Deerfield Beach to Ocean Reef FL out 20 NM; Waters from Deerfield Beach to Ocean Reef FL from 20 to 60 NM excluding the territorial waters of Bahamas"
+      }
+    }
+  ]
+}

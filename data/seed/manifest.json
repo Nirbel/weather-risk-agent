@@ -1,0 +1,26 @@
+{
+  "recorded_at": "2026-10-01T14:48:50+00:00",
+  "today": "2026-10-01",
+  "archive_start": "2016-01-01",
+  "archive_end": "2026-09-25",
+  "declarations_since": "2000-01-01",
+  "nri_version": "December 2025",
+  "hubs": [
+    "chicago",
+    "indianapolis",
+    "columbus",
+    "detroit",
+    "minneapolis",
+    "kansas_city",
+    "st_louis",
+    "denver",
+    "dallas",
+    "houston",
+    "miami",
+    "atlanta",
+    "memphis",
+    "newark",
+    "los_angeles"
+  ],
+  "attribution": "Weather data by Open-Meteo.com (CC BY 4.0), ERA5 reanalysis"
+}

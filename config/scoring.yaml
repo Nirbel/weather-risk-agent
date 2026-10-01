@@ -1,0 +1,185 @@
+# Single source of truth for every threshold, anchor, weight and band.
+# Rationale for each choice: docs/DECISIONS.md (D9–D13).
+
+climatology:            # observed lens window: 10 full calendar years (D9)
+  start: 2016-01-01
+  end: 2025-12-31
+declarations_since: 2000-01-01   # history lens window (OpenFEMA, DR declarations only — D8)
+
+# ---------------------------------------------------------------------------
+# Long-term Exposure Score (investment) — D10, D11, D12
+# ---------------------------------------------------------------------------
+family_weights:          # overall = weighted mean; equal by default (D12)
+  winter: 1
+  hurricane: 1
+  flood: 1
+  severe_storm: 1
+  heat: 1
+
+lens_weights:            # default; renormalized over lenses that exist / loaded
+  observed: 0.4
+  modeled: 0.4
+  history: 0.2
+# Winter and heat override this (D20): they disrupt hubs through operations (closures,
+# slow handling, labour safety), not building damage, so NRI's building-loss rate is a
+# weak proxy there and observed weather frequency is the more direct evidence.
+
+families:
+  winter:
+    label: Winter (snow, ice, extreme cold)
+    lens_weights: {observed: 0.6, modeled: 0.2, history: 0.2}
+    # days per year; `full_score_at` days/yr scores 100 (0 days scores 0).
+    # Anchors are in reanalysis terms (D20): ERA5 smooths daily snowfall (largest day in
+    # 2016–2025 at any hub ≈ 32 cm; Minneapolis ≈ 15 cm), so a 15 cm/day indicator was ~0 everywhere.
+    observed:
+      - {id: snow_days,         label: "Days with snowfall ≥ 2.5 cm (1 in)", variable: snowfall_cm, op: ge, threshold: 2.5, full_score_at: 15}
+      - {id: heavy_snow_days,   label: "Days with snowfall ≥ 10 cm (4 in)",  variable: snowfall_cm, op: ge, threshold: 10,  full_score_at: 1.5}
+      - {id: extreme_cold_days, label: "Days with Tmin ≤ −18 °C (0 °F)",     variable: tmin_c,      op: le, threshold: -18, full_score_at: 15}
+    modeled: {nri: [WNTW, ISTM, CWAV], combine: mean}
+    history: {incident_types: [Winter Storm, Snowstorm, Severe Ice Storm, Freezing], full_score_at: 4}
+  hurricane:
+    label: Hurricane / tropical storm
+    observed: []         # reanalysis is not a hurricane record (HURDAT2 out of scope)
+    modeled: {nri: [HRCN], combine: mean}
+    history: {incident_types: [Hurricane, Tropical Storm, Coastal Storm, Typhoon], full_score_at: 4}
+  flood:
+    label: Flood (inland, coastal, heavy rain)
+    observed:
+      - {id: heavy_rain_days, label: "Days with precipitation ≥ 50 mm (2 in)", variable: precip_mm, op: ge, threshold: 50, full_score_at: 4}
+    modeled: {nri: [IFLD, CFLD], combine: max}
+    history: {incident_types: [Flood, Dam/Levee Break], full_score_at: 4}
+  severe_storm:
+    label: Severe storm (tornado, hail, strong wind)
+    observed: []         # reanalysis cannot resolve tornadoes or hail
+    modeled: {nri: [TRND, HAIL, SWND], combine: mean}
+    history: {incident_types: [Severe Storm, Tornado, Straight-Line Winds], full_score_at: 4}
+  heat:
+    label: Extreme heat
+    lens_weights: {observed: 0.6, modeled: 0.2, history: 0.2}
+    observed:
+      - {id: hot_days, label: "Days with Tmax ≥ 35 °C (95 °F)", variable: tmax_c, op: ge, threshold: 35, full_score_at: 60}
+    modeled: {nri: [HWAV], combine: mean}
+    history: null        # heat is rarely declared a major disaster
+
+nri_hazard_names:
+  WNTW: Winter weather
+  ISTM: Ice storm
+  CWAV: Cold wave
+  HRCN: Hurricane
+  IFLD: Inland flooding
+  CFLD: Coastal flooding
+  TRND: Tornado
+  HAIL: Hail
+  SWND: Strong wind
+  HWAV: Heat wave
+
+robustness:
+  perturbation: 0.25     # each weight moved ±25 %, one at a time
+  tie_margin: 3.0        # score points; closer than this = effectively tied
+
+# ---------------------------------------------------------------------------
+# Near-term Risk Score (next 7 days, drives alerts) — D10
+# points = [[value, score], ...] sorted by value; linear between points, flat outside.
+# ---------------------------------------------------------------------------
+near_term:
+  forecast:
+    winter:
+      - {variable: snowfall_cm, label: "Daily snowfall (cm)",     points: [[0, 0], [2.5, 40], [15, 80], [30, 100]]}
+      - {variable: tmin_c,      label: "Daily minimum temp (°C)", points: [[-25, 100], [-10, 20], [0, 0]]}
+    flood:
+      - {variable: precip_mm,   label: "Daily precipitation (mm)", points: [[0, 0], [25, 30], [50, 60], [100, 100]]}
+    severe_storm:
+      - {variable: gust_kmh,    label: "Daily max gust (km/h)",    points: [[0, 0], [60, 20], [90, 60], [120, 100]]}
+    heat:
+      - {variable: tmax_c,      label: "Daily maximum temp (°C)",  points: [[30, 0], [35, 30], [40, 70], [43, 100]]}
+  nws_severity: {Extreme: 100, Severe: 80, Moderate: 50, Minor: 25, Unknown: 25}
+  nws_certainty:         # alert score = severity × certainty (a "Possible" watch is not an observed event)
+    {Observed: 1.0, Likely: 1.0, Possible: 0.7, Unlikely: 0.4, Unknown: 0.7}
+  nws_events:            # alert event name contains one of these → family (first match wins, in this order)
+    hurricane: [Hurricane, Tropical Storm, Storm Surge]
+    flood: [Flood]
+    winter: [Winter, Blizzard, Ice Storm, Snow, Freeze, Frost, Wind Chill, Cold]
+    severe_storm: [Tornado, Thunderstorm, High Wind, Wind Advisory, Extreme Wind]
+    heat: [Heat]
+  bands:                 # lower bound → band
+    - {min: 0,  band: Low}
+    - {min: 25, band: Guarded}
+    - {min: 50, band: Elevated}
+    - {min: 75, band: Severe}
+
+# ---------------------------------------------------------------------------
+# "% of days" statistics (D13)
+# ---------------------------------------------------------------------------
+stats:
+  snowfall_days:
+    label: Days with measurable snowfall (≥ 0.25 cm / 0.1 in)
+    variable: snowfall_cm
+    op: ge
+    threshold: 0.25
+    sensitivity:
+      - {label: "Any snowfall (> 0 cm)",           op: gt, threshold: 0}
+      - {label: "Measurable (≥ 0.25 cm / 0.1 in)", op: ge, threshold: 0.25}
+      - {label: "≥ 2.5 cm (1 in)",                 op: ge, threshold: 2.5}
+  heavy_snow_days:
+    label: Days with heavy snowfall (≥ 10 cm / 4 in)
+    variable: snowfall_cm
+    op: ge
+    threshold: 10
+    sensitivity:
+      - {label: "≥ 5 cm (2 in)",   op: ge, threshold: 5}
+      - {label: "≥ 10 cm (4 in)",  op: ge, threshold: 10}
+      - {label: "≥ 15 cm (6 in)",  op: ge, threshold: 15}
+  freezing_days:
+    label: Days with minimum temperature ≤ 0 °C (32 °F)
+    variable: tmin_c
+    op: le
+    threshold: 0
+    sensitivity:
+      - {label: "Tmin ≤ 0 °C",   op: le, threshold: 0}
+      - {label: "Tmin ≤ −10 °C", op: le, threshold: -10}
+      - {label: "Tmin ≤ −18 °C", op: le, threshold: -18}
+  extreme_cold_days:
+    label: Days with minimum temperature ≤ −18 °C (0 °F)
+    variable: tmin_c
+    op: le
+    threshold: -18
+    sensitivity:
+      - {label: "Tmin ≤ −10 °C", op: le, threshold: -10}
+      - {label: "Tmin ≤ −18 °C", op: le, threshold: -18}
+      - {label: "Tmin ≤ −25 °C", op: le, threshold: -25}
+  rain_days:
+    label: Days with precipitation ≥ 1 mm
+    variable: precip_mm
+    op: ge
+    threshold: 1
+    sensitivity:
+      - {label: "> 0 mm",   op: gt, threshold: 0}
+      - {label: "≥ 1 mm",   op: ge, threshold: 1}
+      - {label: "≥ 10 mm",  op: ge, threshold: 10}
+  heavy_rain_days:
+    label: Days with precipitation ≥ 50 mm (2 in)
+    variable: precip_mm
+    op: ge
+    threshold: 50
+    sensitivity:
+      - {label: "≥ 25 mm", op: ge, threshold: 25}
+      - {label: "≥ 50 mm", op: ge, threshold: 50}
+      - {label: "≥ 100 mm", op: ge, threshold: 100}
+  hot_days:
+    label: Days with maximum temperature ≥ 35 °C (95 °F)
+    variable: tmax_c
+    op: ge
+    threshold: 35
+    sensitivity:
+      - {label: "Tmax ≥ 32 °C", op: ge, threshold: 32}
+      - {label: "Tmax ≥ 35 °C", op: ge, threshold: 35}
+      - {label: "Tmax ≥ 38 °C", op: ge, threshold: 38}
+  windy_days:
+    label: Days with gusts ≥ 75 km/h (47 mph)
+    variable: gust_kmh
+    op: ge
+    threshold: 75
+    sensitivity:
+      - {label: "Gust ≥ 60 km/h", op: ge, threshold: 60}
+      - {label: "Gust ≥ 75 km/h", op: ge, threshold: 75}
+      - {label: "Gust ≥ 90 km/h", op: ge, threshold: 90}

@@ -1,0 +1,73 @@
+{
+  "latitude": 39.846874,
+  "longitude": -104.680504,
+  "generationtime_ms": 0.4786252975463867,
+  "utc_offset_seconds": -21600,
+  "timezone": "America/Denver",
+  "timezone_abbreviation": "GMT-6",
+  "elevation": 1637.0,
+  "daily_units": {
+    "time": "iso8601",
+    "snowfall_sum": "cm",
+    "precipitation_sum": "mm",
+    "temperature_2m_max": "°C",
+    "temperature_2m_min": "°C",
+    "wind_gusts_10m_max": "km/h"
+  },
+  "daily": {
+    "time": [
+      "2026-10-01",
+      "2026-10-02",
+      "2026-10-03",
+      "2026-10-04",
+      "2026-10-05",
+      "2026-10-06",
+      "2026-10-07"
+    ],
+    "snowfall_sum": [
+      0.00,
+      0.00,
+      0.00,
+      0.00,
+      0.00,
+      0.00,
+      0.00
+    ],
+    "precipitation_sum": [
+      0.00,
+      0.00,
+      0.00,
+      0.00,
+      0.00,
+      1.20,
+      0.00
+    ],
+    "temperature_2m_max": [
+      20.9,
+      27.3,
+      28.7,
+      27.1,
+      29.4,
+      27.3,
+      24.8
+    ],
+    "temperature_2m_min": [
+      9.8,
+      8.4,
+      13.6,
+      11.8,
+      13.3,
+      16.6,
+      12.3
+    ],
+    "wind_gusts_10m_max": [
+      34.9,
+      42.8,
+      44.6,
+      47.9,
+      44.6,
+      25.9,
+      46.8
+    ]
+  }
+}
