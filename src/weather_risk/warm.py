@@ -37,9 +37,12 @@ async def main(use_replay: bool) -> None:
     families = list(load_scoring_config().families)
     print(f"Exposure {result.start.year}–{result.end.year} · NRI {result.nri_version}")
     print(f"{'hub':13}{'overall':>8}" + "".join(f"{f[:9]:>11}" for f in families) + f"{'top':>14}")
-    for hub_id, bd in sorted(result.breakdowns.items(), key=lambda kv: -(kv[1]["score"] or 0)):
-        fams = "".join(f"{bd['families'][f]['score'] or 0:>11.1f}" for f in families)
-        print(f"{hub_id:13}{bd['score']:>8.1f}{fams}{bd['top_family']:>14}")
+    def cell(score: float | None, width: int) -> str:
+        return f"{'—' if score is None else f'{score:.1f}':>{width}}"  # — = not scored (missing or incomplete data)
+
+    for hub_id, bd in sorted(result.breakdowns.items(), key=lambda kv: -(kv[1]["score"] or -1)):
+        fams = "".join(cell(bd["families"][f]["score"], 11) for f in families)
+        print(f"{hub_id:13}{cell(bd['score'], 8)}{fams}{bd['top_family'] or '—':>14}")
         for gap in bd["data_gaps"]:
             print(f"   gap: {gap}")
 

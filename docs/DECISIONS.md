@@ -18,15 +18,17 @@ D21 records a scope narrowing requested mid-build. Entries that changed because 
 | D12 | Overall exposure = equal-weight mean of families | KPI |
 | D13 | Stat thresholds in config, always printed | KPI |
 | D14 | Async SQLAlchemy + SQLite (aiosqlite) | Storage |
-| D15 | One run script; Docker optional; no cloud deploy yet | Ops |
-| D16 | Eval: offline replay by default, `--live` for the real LLM | Eval |
+| D15 | One run script; Docker Compose optional; no cloud deploy yet | Ops |
+| D16 | Eval: offline replay, `--live` LLM, `--online` end to end | Eval |
 | D17 | Pragmatic TDD for core logic | Process |
-| D18 | Identity-lite auth | Security |
+| D18 | Small email + password auth, sign-up for @moveo.co.il | Security |
 | D19 | Hub roster: 10 representative hubs (an assumption) | Scope |
 | D20 | Calibration after the first real-data run | KPI |
 | D21 | Narrow one-day scope (mid-build rescope) | Scope |
-| D22 | Score-change alerts: baseline diff, generic webhook | Bonus |
+| D22 | Score-change alerts: per-user baseline, generic webhook | Bonus |
 | D23 | Voice input through the same LLM wrapper | Bonus |
+| D24 | Coverage rule: incomplete data is never ranked | KPI |
+| D25 | Online end-to-end eval checks answers against the code, not fixed values | Eval |
 
 D8 (FEMA declarations) and D10 (separate near-term score) were removed by D21. They are kept below for the record.
 
@@ -147,27 +149,37 @@ D8 (FEMA declarations) and D10 (separate near-term score) were removed by D21. T
 - **Detail:** SQLite allows one writer, so the store serializes writes with an async lock rather than hitting "database is locked". WAL mode lets readers run while the API writes.
 - **Rejected:** Postgres (no concurrency need; it's the migration path), JSON files (no range queries or transactions), DuckDB (built for analytics).
 
-## D15 — One run script; Docker optional; no cloud deploy yet
+## D15 — One run script; Docker Compose optional; no cloud deploy yet
 
 - **Decision:** `uv run python scripts/run.py` is the default way to run the app. It starts FastAPI (:8000) and Streamlit (:8501) together and stops them together. There is no Makefile. The cloud host will be chosen later (user decision).
-- **Docker:** optional. The Dockerfile runs the same script. At the user's request the app is run and demoed with the script, not Docker. The image was not verified end to end on the build machine: its disk was full, and the build failed with an I/O error.
+- **Docker Compose** (for the user's own server): one image, two services. `backend` runs uvicorn, reads `.env`, owns the SQLite volume and has a health check; `frontend` runs Streamlit with only `API_URL=http://backend:8000` and starts when the backend is healthy. The container runs as a non-root user.
+- **Not run on the development machine** (user's instruction): the compose file was validated with `docker-compose config`, and each service's exact command and health check were run on the host. A full `docker compose up` was not done here.
+- **Clean clone:** the SQLite file's parent directory is created on startup, so a fresh checkout runs without `mkdir data` (regression tests at store and app level).
 
-## D16 — Eval: offline replay by default, `--live` for the real LLM
+## D16 — Eval: offline replay, `--live` LLM, `--online` end to end
 
-- **Decision:**
-  - **Offline:** replays recorded real API responses (`tests/fixtures/recorded/`, exactly the requests the runtime makes), feeds each case's expected plan to the executor, and uses the template explainer. No keys, no network.
-  - **`--live`:** runs the real planner and explainer over the same replayed data.
-- **Why:** Offline checks the deterministic core and the answer contract on every run. Live measures plan accuracy and grounding. Replayed data keeps expected numbers stable. Recorded responses are test fixtures only, never a runtime dependency (D21).
+- **Decision:** three modes over the same 22 cases (`eval/cases.yaml`).
+  - **Offline** (default): replays recorded real API responses (`tests/fixtures/recorded/`, exactly the requests the runtime makes), feeds each case's expected plan to the executor, and uses the template explainer. No keys, no network; fast and reproducible.
+  - **`--live`:** the real planner and explainer over the same replayed data. Measures plan accuracy and grounding with stable numbers.
+  - **`--online`:** the real application flow end to end (D25).
+- **Why:** offline guards the deterministic core and the answer contract on every run; the LLM modes measure what only a real model can show. Recorded responses are test fixtures only, never a runtime dependency (D21).
 
 ## D17 — Pragmatic TDD for core logic
 
 - **Decision:** Core logic (scoring, stats, windows, config validation, plan validation, grounding, executor, assembler) is written test-first with hand-computed fixtures. I/O glue is tested alongside, with every external call mocked or replayed.
 - **Why:** The numbers are the product, so they get the strongest guarantees.
 
-## D18 — Identity-lite auth
+## D18 — Small email + password auth, sign-up for @moveo.co.il
 
-- **Decision:** An allow-listed email gets a signed bearer token with an `analyst` or `admin` role. Conversations belong to their owner.
-- **Limitation (documented):** There is no password or magic link. This is not production authentication.
+- **Decision (user requirement, replacing the earlier email allow-list):**
+  - Log in with email + password; a signed bearer token (HS256, 12 h) carries the session.
+  - Public sign-up only for addresses whose domain is exactly `moveo.co.il`, checked after NFKC normalization, trimming and lower-casing; the domain is the part after the last `@`, so `user@moveo.co.il.attacker.com` is refused. Sign-up always creates an `analyst`; the request model has no `role` field and forbids extra fields.
+  - Demo admin `admin@moveo.co.il` / `12345678` (task requirement) is created on first start. `DEMO_ADMIN_PASSWORD` overrides it and rotates it on restart; the startup log warns while the default is in use.
+  - Passwords are stored as salted scrypt hashes (stdlib `hashlib`, no new dependency). Wrong password and unknown email get the same 401, with equal hashing work.
+  - Every request re-reads the account, so the role comes from the database and a deleted account loses access at once. Conversations are filtered by owner; another user's id answers 404.
+  - An empty or short `JWT_SECRET` is replaced by a random one at startup (users log in again after a restart).
+- **Deliberately not included:** password reset, email verification, OAuth, refresh tokens, login rate limiting.
+- **Limitation:** without email verification anyone can claim an unused `@moveo.co.il` address. That is why webhook destinations are checked (D22).
 
 ## D19 — Hub roster: 10 representative hubs (an assumption)
 
@@ -203,21 +215,44 @@ D8 (FEMA declarations) and D10 (separate near-term score) were removed by D21. T
 - **Kept:** verified FIPS values, the YAML structure, recorded real API fixtures, the source adapters, the TDD approach and the D20 calibration.
 - **Lost evidence, stated in answers:** without FEMA declarations, hurricane and severe-storm scores rest on NRI alone.
 
-## D22 — Score-change alerts: baseline diff, generic webhook
+## D22 — Score-change alerts: per-user baseline, generic webhook
 
 - **Decision:**
-  - A check scores all hubs and compares each overall Exposure Score with a **baseline**: the score analysts were last told about.
-  - A change of at least the threshold (default 5 points on 0–100) is stored and posted as JSON to one webhook URL.
-  - The baseline moves only when a hub alerts, so slow drift accumulates until it crosses the threshold.
-- **Triggers:** an in-process scheduler (every 24 h by default; its first check, 30 s after startup, records the baseline and warms the cache), or `POST /alerts/run` with an admin token or the `X-Alert-Secret` header for an external cron.
-- **Data gaps:** a hub with any data gap is skipped and keeps its baseline. Otherwise a failed Open-Meteo fetch would drop a lens, move the score and raise a false alert.
-- **Webhook:** provider-agnostic JSON with a `text` summary, which Slack incoming webhooks accept as-is. An admin sets URL, on/off and threshold in the UI, with a test button. Redirects are not followed.
-- **Why alert on exposure, not a forecast:** the near-term score was removed by D21. The trade-off is that exposure covers 5 completed years, so alerts are rare by design. They fire when the window rolls over each January, when FEMA publishes a new NRI release, when the scoring config changes, or when a data gap closes.
-- **Rejected:** alerting on rank changes (ties flip ranks on tiny moves), and per-family alerts (more noise for a bonus feature; the payload names the top hazard instead).
+  - Each user sets their own webhook on the *Alerts* page: URL, on/off, threshold (default 5 points on 0–100), Save, Test webhook.
+  - A check scores all hubs once, then compares each overall Exposure Score with **that user's baseline** (the score they were last told about). Changes of at least their threshold go to their feed and their webhook.
+  - A baseline moves only when a hub alerts for that user, so slow drift accumulates until it crosses the threshold. A new subscriber starts from the latest check.
+- **Triggers:** an in-process scheduler (every 24 h by default; its first check, 30 s after startup, also warms the cache), or `POST /alerts/run` with an admin token or the `X-Alert-Secret` header for an external cron.
+- **Data gaps:** a hub with any data gap is skipped and keeps its baseline, so a failed fetch never raises a false alert.
+- **Webhook:** provider-agnostic JSON (`event`, a plain `text` summary, structured `changes`), so Make, n8n, Zapier, Slack or Teams workflows, or any HTTP endpoint can consume it. Nothing is tied to a provider.
+- **Safety:** http(s) only, 10 s timeout, redirects not followed. Because any signed-up user chooses the URL the server calls (SSRF), the host is resolved and checked when saving and again when sending: link-local / metadata / multicast / unspecified addresses are always refused; private and loopback addresses only with `ALLOW_PRIVATE_WEBHOOKS=true` (for a self-hosted n8n on the LAN). Residual risk: a DNS change between the check and the connection.
+- **Why alert on exposure, not a forecast:** the near-term score was removed by D21. Exposure covers 5 completed years, so alerts are rare by design: the window rolls over each January, FEMA publishes a new NRI release, the scoring config changes, or a data gap closes.
+- **Rejected:** one global admin-owned webhook (users asked to configure their own), alerting on rank changes (ties flip ranks on tiny moves), per-family alerts (more noise; the payload names the top hazard).
 
 ## D23 — Voice input through the same LLM wrapper
 
 - **Decision:** Streamlit's chat input records audio. `POST /transcribe` sends it to Groq Whisper (`whisper-large-v3-turbo`) through LiteLLM. The text then goes through the normal chat turn and is shown as the user's message, so a mis-heard question is visible.
 - **Why:** it reuses the existing provider, key and LiteLLM dependency. There is no extra service, and nothing about how numbers are computed changes.
 - **Limitation:** the microphone appears only when a key for the transcription provider is set. There is no Gemini fallback for transcription.
+
+## D24 — Coverage rule: incomplete data is never ranked
+
+- **Decision (user requirement):** a hub's weather record for the window being scored counts as complete only if at least **99 %** of the expected days have data **and** no run of missing days is longer than **3**. Both values live in `config/scoring.yaml → coverage`. A day counts only if every variable the score reads is present.
+- **When it fails:** families that use observed weather (winter, flood, heat) get no score — they are *not* renormalized to NRI alone — and neither does the overall. The hub is listed as *not ranked* / *not compared* with the reason; stat answers give the days with data but no percentage; uncertainty is high. Hazards scored from NRI alone (hurricane, severe storm) still rank.
+- **Same principle for a missing source:** a requested hazard with no evidence at all (e.g. hurricane while FEMA NRI is down) blocks the combined score instead of being silently dropped. Partial evidence inside a hazard still scores from the remaining lens, flagged as a data gap.
+- **Why:** a ranking from an incomplete record looks as reliable as a complete one. Analysts need to see the hub is missing, not a lower score.
+- **Seen live:** in the first online eval run a Dallas year failed to download during the bulk fetch; Dallas was marked incomplete until the next request re-fetched the year.
+- **Detail:** the coverage percentage is floored (98.96 % shows as 98.9 %, never "99.0 %").
+
+## D25 — Online end-to-end eval checks answers against the code, not fixed values
+
+- **Decision:** `uv run python -m eval.run --online` runs every case through `Agent.ask`: real LLM planner → real Open-Meteo / FEMA NRI (a fresh cache by default, so the APIs are really called) → deterministic computation → real LLM explanation → validation.
+- **No live values are hard-coded** (public data changes). Each answer is checked against what the code produces in the same run:
+  - plan: schema-valid; intent, hubs, hazards and time period match the case (expected years can be relative: `year: {years_ago: 2}`);
+  - numbers: the answer table equals the code's result for the expected plan, and equals re-executing the plan the LLM chose;
+  - grounding: every number in the text is in the computed result or the question;
+  - window, assumptions, sources and uncertainty level equal the code's;
+  - follow-ups: later turns must resolve context from earlier ones.
+- **Fault injection:** primary LLM model unavailable (fallback must answer with unchanged numbers), all LLMs unavailable (clear error answer), Open-Meteo unreachable (nothing ranked), FEMA NRI unreachable (no hurricane or combined score). If the fallback provider itself is out of quota, the fallback case is reported *inconclusive*, not passed or failed.
+- **What it found on its first run** (and was fixed): a planner that dropped a named hazard, a stat follow-up planned as an exposure comparison, and a comparison that silently dropped a hazard whose only source was down. It also showed both free LLM tiers can be exhausted at once (Groq 8K tokens/min, Gemini daily quota); a temporary 503 is now retried once before falling back.
+- **Cost:** ~4 minutes of data download plus ~15 s pacing per LLM turn (Groq free tier).
 

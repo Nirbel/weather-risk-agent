@@ -22,7 +22,7 @@
 > - Analytics charts the same deterministic results chat uses.
 > - Alert settings (later): generic webhook URL, enabled flag, score-change threshold, Test Webhook. Webhooks stay provider-agnostic.
 >
-> **Status (2026-10-01, end of day):** M1–M8 done. The app runs with `uv run python scripts/run.py` (the default; Docker optional, D15). Alerts and voice: D22, D23. Design: [ARCHITECTURE.md](ARCHITECTURE.md).
+> **Status (2026-10-02):** M1–M8 done, plus a review round requested by the user: email + password auth with `@moveo.co.il` sign-up (D18), per-user webhooks (D22), the coverage rule (D24), an online end-to-end eval (D25), clean-clone startup and a two-service Compose file (D15). The app runs with `uv run python scripts/run.py`. Design: [ARCHITECTURE.md](ARCHITECTURE.md).
 >
 > **Milestones now:**
 > - M1–M3 rescoped and done.

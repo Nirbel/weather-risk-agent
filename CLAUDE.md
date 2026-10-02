@@ -6,6 +6,7 @@ Weather Risk Intelligence Agent: a chat agent that ranks, compares and explains 
 - Plan: [docs/PLAN.md](docs/PLAN.md)
 - Decisions: [docs/DECISIONS.md](docs/DECISIONS.md)
 - Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- AI session: [docs/AI_SESSION.md](docs/AI_SESSION.md)
 
 ## Design principles
 
@@ -17,7 +18,7 @@ Weather Risk Intelligence Agent: a chat agent that ranks, compares and explains 
 
 ## Development rules
 
-- **Pragmatic TDD for core logic** (scoring, stats, date resolution, plan validation, grounding check, executor, answer contract, alert diff):
+- **Pragmatic TDD for core logic** (scoring, stats, coverage rule, date resolution, plan validation, grounding check, executor, answer contract, alert diff, email/password rules):
   - Write a failing test first, then implement, then refactor.
   - Use small hand-computable fixtures. Work out expected values by hand; never copy them from the implementation's output.
 - **I/O glue** (HTTP clients, API routes, LLM wrapper): write tests alongside the code. Mock every external call (respx, mocked LiteLLM).
@@ -29,7 +30,7 @@ Weather Risk Intelligence Agent: a chat agent that ranks, compares and explains 
 - **LLM:** go through LiteLLM only. Primary is Groq `openai/gpt-oss-20b` (strict JSON schema); Gemini is the fallback. Keep prompts compact, because Groq's free tier allows 8K tokens/min.
 - **Running:**
   - `uv run python scripts/run.py` starts the API and Streamlit together.
-  - Docker is optional; the image runs the same script.
+  - Docker is optional: `docker compose up -d --build` runs two services (backend, frontend) from one image.
   - There is no Makefile.
 - **Docs:** short, clear Markdown.
 - **Streamlit:** use the `developing-with-streamlit` skill.

@@ -1,8 +1,9 @@
 .git
 .venv
 .idea
+.claude
 .env
-data/app.db*
+data/
 eval/reports
 **/__pycache__
 .pytest_cache

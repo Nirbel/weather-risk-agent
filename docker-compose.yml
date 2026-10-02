@@ -1,0 +1,54 @@
+# Weather Risk Intelligence Agent on a server: two services from one image.
+#
+#   cp .env.example .env          # set GROQ_API_KEY and/or GEMINI_API_KEY (and change DEMO_ADMIN_PASSWORD)
+#   docker compose up -d --build
+#
+#   UI   http://<server>:8501   (frontend)
+#   API  http://<server>:8000/docs  (backend)
+#
+# Only the backend reads .env (API keys, auth, alerts). The frontend gets just API_URL and
+# talks to the backend over the compose network. Cached data lives in the `app-data` volume.
+name: weather-risk-agent
+
+services:
+  backend:
+    build: .
+    image: weather-risk-agent:latest
+    command: ["uvicorn", "weather_risk.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////app/data/app.db
+    volumes:
+      - app-data:/app/data
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    image: weather-risk-agent:latest  # built by the backend service
+    pull_policy: never
+    command: ["streamlit", "run", "ui/streamlit_app.py", "--server.address", "0.0.0.0", "--server.port", "8501",
+              "--server.headless", "true", "--browser.gatherUsageStats", "false"]
+    environment:
+      API_URL: http://backend:8000
+    ports:
+      - "${UI_PORT:-8501}:8501"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  app-data:
