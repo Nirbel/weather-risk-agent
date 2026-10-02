@@ -131,8 +131,12 @@ deterministic computation → real LLM explanation → validation.
   - assumptions, sources and uncertainty.
 - It then injects failures (LLM down, all LLMs down, Open-Meteo down, FEMA NRI down) and checks that the
   answer degrades gracefully.
-- Turns are paced for the Groq free tier, so a full run takes 15–20 minutes.
+- Turns are paced for the Groq free tier, so a full run takes 15–20 minutes. If every LLM provider is
+  rate-limited or out of quota, a case cools down and retries once, then counts as *inconclusive*
+  (provider capacity, not the agent); re-run those cases later with `--only`.
 - Add `--cache data/eval.db` to keep the downloaded data between runs, or `--only B1,X3` for a subset.
+- **LLM budget:** a full online run uses about 200K LLM tokens. That is the Groq free tier's daily limit, so on
+  free keys run it about once a day (Gemini covers the overflow while its daily quota lasts), or run subsets.
 
 ```bash
 uv run python -m eval.run --live

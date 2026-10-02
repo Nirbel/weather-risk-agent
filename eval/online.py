@@ -49,6 +49,8 @@ DATA_DEPENDENT = {"top_hub", "order", "stat_matches_raw", "uncertainty_mentions"
 FIELD_GROUPS = {"intent": ("intent",), "hubs": ("hubs", "region"), "hazards": ("hazards",),
                 "time period": ("metric", "time_preset", "year")}
 OPEN_METEO, ARCGIS = "archive-api.open-meteo.com", "services.arcgis.com"
+UNAVAILABLE = "The language model is unavailable"  # every provider failed (rate limit, quota, outage)
+COOL_DOWN_S = 60.0
 
 
 class FailingHosts(httpx.AsyncBaseTransport):
@@ -82,8 +84,10 @@ async def check_turn(agent: Agent, question: str, previous: str | None, answer: 
     except ValueError as exc:
         notes.append(f"plan invalid: {exc}")
     checks["plan valid"] = plan is not None
-    if plan_dict is None:
-        notes.append(f"no plan — {answer['answer'][:120]}")
+    if plan_dict is None:  # say why: provider outage (rate limit, quota, 503) or invalid output twice
+        planner = answer["meta"].get("planner") or {}
+        why = (planner.get("provider_errors") or planner.get("validation_errors") or answer["reasoning"] or ["?"])[-1]
+        notes.append(f"no plan — {why[:200]}")
 
     _, _, mismatches = plan_matches(expected, plan_dict)
     notes += [f"plan — {m}" for m in mismatches]
@@ -141,6 +145,7 @@ async def run_case(case: dict, agent: Agent, pause: float) -> dict:
         conversation_id = answer["conversation_id"]
         result = await check_turn(agent, turn["question"], previous, answer, expected)
         result |= {"question": turn["question"], "follow_up": i > 0, "answer": answer["answer"],
+                   "llm_unavailable": answer["intent"] == "error" and answer["reasoning"][0].startswith(UNAVAILABLE),
                    "explanation_source": answer["meta"].get("explanation_source"),
                    "fallback_used": any((answer["meta"].get(k) or {}).get("fallback_used")
                                         for k in ("planner", "explainer"))}
@@ -153,7 +158,23 @@ async def run_case(case: dict, agent: Agent, pause: float) -> dict:
     portable = {k: v for k, v in case.get("checks", {}).items() if k not in DATA_DEPENDENT}
     failures += run_checks(portable, answer)
     return {"id": case["id"], "group": case["group"], "passed": not failures, "failures": failures, "turns": turns,
+            "llm_unavailable": any(t["llm_unavailable"] for t in turns),
             "latency_ms": int((time.perf_counter() - started) * 1000)}
+
+
+async def run_case_with_retry(case: dict, agent: Agent, pause: float) -> dict:
+    """If every LLM provider was out (free-tier rate limit or quota), cool down and retry the case once.
+    Still out → inconclusive: that measures provider capacity, not the agent."""
+    result = await run_case(case, agent, pause)
+    if result["passed"] or not result["llm_unavailable"]:
+        return result
+    print(f"      {case['id']}: every LLM provider was rate-limited or out of quota — "
+          f"cooling down {COOL_DOWN_S:g} s and retrying once", flush=True)
+    await asyncio.sleep(COOL_DOWN_S)
+    retry = await run_case(case, agent, pause) | {"retried": True}
+    if not retry["passed"] and retry["llm_unavailable"]:
+        retry["skipped"] = "inconclusive — LLM providers unavailable (rate limit or quota)"
+    return retry
 
 
 # -- fault cases ---------------------------------------------------------------------------
@@ -166,12 +187,22 @@ async def fault_cases(db: Database, client: httpx.AsyncClient, settings: Setting
     def want(cid: str) -> bool:
         return not only or cid in only
 
+    def unavailable(answer: dict) -> bool:
+        return answer["intent"] == "error" and answer["reasoning"][0].startswith(UNAVAILABLE)
+
     async def case(cid: str, name: str, question: str, agent: Agent, verify) -> None:
         started = time.perf_counter()
         skipped = None
         try:
             answer = (await agent.ask(question, None, user_email="eval-online")).model_dump(mode="json")
+            if cid in ("X3", "X4") and unavailable(answer):  # these test data faults; the planner must answer
+                print(f"      {cid}: every LLM provider was rate-limited or out of quota — cooling down "
+                      f"{COOL_DOWN_S:g} s and retrying once", flush=True)
+                await asyncio.sleep(COOL_DOWN_S)
+                answer = (await agent.ask(question, None, user_email="eval-online")).model_dump(mode="json")
             failures = verify(answer)
+            if cid in ("X3", "X4") and unavailable(answer):
+                skipped, failures = "inconclusive — LLM providers unavailable (rate limit or quota)", []
             if cid == "X1" and failures:
                 # The fault forces the fallback; if the fallback provider is itself out (quota, overload),
                 # the run can't tell whether fallback works — say so instead of reporting a code failure.
@@ -297,10 +328,11 @@ async def main(only: set[str] | None, pause: float, cache: str | None) -> int:
             for i, case in enumerate(c for c in cases if not c["id"].startswith("X")):
                 if i and pause:
                     await asyncio.sleep(pause)  # Groq free tier: 8K tokens/min
-                result = await run_case(case, agent, pause)
+                result = await run_case_with_retry(case, agent, pause)
                 results.append(result)
                 explained_by = ",".join(sorted({t["explanation_source"] or "-" for t in result["turns"]}))
-                print(f"{'PASS' if result['passed'] else 'FAIL'}  {case['id']:3} {case['group']:17} "
+                status = "SKIP" if result.get("skipped") else "PASS" if result["passed"] else "FAIL"
+                print(f"{status}  {case['id']:3} {case['group']:17} "
                       f"{result['latency_ms']:>6} ms  {explained_by:8}  turns {len(result['turns'])}", flush=True)
                 for failure in result["failures"]:
                     print(f"        - {failure}", flush=True)
@@ -318,12 +350,17 @@ async def main(only: set[str] | None, pause: float, cache: str | None) -> int:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    flow = [r for r in results if "turns" in r]
+    inconclusive = [r for r in results if r.get("skipped")]
+    decided = [r for r in results if not r.get("skipped")]
+    flow = [r for r in decided if "turns" in r]  # rates over cases with an answer from the agent
     turns = [t for r in flow for t in r["turns"]]
-    passed = sum(r["passed"] for r in results)
+    passed = sum(r["passed"] for r in decided)
+    failed = len(decided) - passed
     summary: dict[str, Any] = {
-        "mode": "online", "today": today.isoformat(), "data_fetch_s": fetch_s,
-        "cases": len(results), "passed": passed, "pass_rate": round(passed / len(results), 3) if results else None,
+        "mode": "online", "today": today.isoformat(), "data_fetch_s": fetch_s, "cases": len(results),
+        "passed": passed, "failed": failed, "inconclusive": len(inconclusive),
+        "pass_rate": round(passed / len(decided), 3) if decided else None,
+        "retried_after_cool_down": sum(bool(r.get("retried")) for r in results),
         "plan_valid": _rate(flow, "plan valid"), "intent": _rate(flow, "intent"), "hubs": _rate(flow, "hubs"),
         "hazards": _rate(flow, "hazards"), "time_period": _rate(flow, "time period"),
         "follow_ups": _rate(flow, "plan fields", follow_up_only=True), "numbers_match_code": _rate(flow, "numbers"),
@@ -334,7 +371,6 @@ async def main(only: set[str] | None, pause: float, cache: str | None) -> int:
         "provider_fallbacks": sum(bool(t["fallback_used"]) for t in turns),
         "faults_passed": f"{sum(r['passed'] and not r.get('skipped') for r in results if 'fault' in r)}/"
                          f"{sum('fault' in r for r in results)}",
-        "faults_inconclusive": sum(bool(r.get("skipped")) for r in results if "fault" in r),
         "latency_p50_ms": sorted(r["latency_ms"] for r in flow)[len(flow) // 2] if flow else None,
     }
     print("\n" + "  ".join(f"{k}={v}" for k, v in summary.items()))
@@ -342,4 +378,7 @@ async def main(only: set[str] | None, pause: float, cache: str | None) -> int:
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps({"summary": summary, "results": results}, indent=2, ensure_ascii=False) + "\n")
     print(f"report: {report.relative_to(ROOT)}")
-    return 0 if passed == len(results) else 1
+    if inconclusive:
+        print(f"inconclusive (LLM capacity, not the agent): {', '.join(r['id'] for r in inconclusive)} — "
+              "re-run them later with --only")
+    return 1 if failed else 0
