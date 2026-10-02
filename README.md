@@ -10,6 +10,11 @@ so analysts can choose which hubs to invest in.
   the FEMA National Risk Index. Incomplete data is never ranked as if it were complete.
 - **Bonuses:** score-change alerts to your own webhook, and voice questions.
 
+
+**Live demo:** [https://weather-risk.duckdns.org](https://weather-risk.duckdns.org)
+
+
+
 **Documentation:** [Architecture](docs/ARCHITECTURE.md) (components, repo structure, storage) ·
 [Decisions](docs/DECISIONS.md) · [Plan](docs/PLAN.md) · [Task](docs/TASK.md) ·
 [AI session](docs/AI_SESSION.md) (how it was built with Claude Code; transcript in [docs/session/](docs/session/))
