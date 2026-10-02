@@ -158,19 +158,32 @@ async def run_case(case: dict, agent: Agent, pause: float) -> dict:
 
 # -- fault cases ---------------------------------------------------------------------------
 
-async def fault_cases(db: Database, client: httpx.AsyncClient, settings: Settings) -> list[dict]:
+async def fault_cases(db: Database, client: httpx.AsyncClient, settings: Settings,
+                      only: set[str] | None = None) -> list[dict]:
     """Inject failures and check graceful degradation (no crash, honest answer, high uncertainty)."""
     results = []
 
+    def want(cid: str) -> bool:
+        return not only or cid in only
+
     async def case(cid: str, name: str, question: str, agent: Agent, verify) -> None:
         started = time.perf_counter()
+        skipped = None
         try:
             answer = (await agent.ask(question, None, user_email="eval-online")).model_dump(mode="json")
             failures = verify(answer)
+            if cid == "X1" and failures:
+                # The fault forces the fallback; if the fallback provider is itself out (quota, overload),
+                # the run can't tell whether fallback works — say so instead of reporting a code failure.
+                errors = (answer["meta"].get("planner") or {}).get("provider_errors", [])
+                fallback_errors = [e for e in errors if e.startswith(settings.llm_fallback_model)]
+                if fallback_errors:
+                    skipped, failures = f"inconclusive — fallback provider unavailable: {fallback_errors[-1][:140]}", []
         except Exception as exc:  # the point of these cases: nothing may raise
             answer, failures = {}, [f"raised {exc.__class__.__name__}: {exc}"]
         results.append({"id": cid, "group": "Failures", "fault": name, "passed": not failures, "failures": failures,
-                        "answer": answer.get("answer"), "latency_ms": int((time.perf_counter() - started) * 1000)})
+                        "skipped": skipped, "answer": answer.get("answer"),
+                        "latency_ms": int((time.perf_counter() - started) * 1000)})
 
     def expect(*conditions: tuple[bool, str]) -> list[str]:
         return [message for ok, message in conditions if not ok]
@@ -178,28 +191,34 @@ async def fault_cases(db: Database, client: httpx.AsyncClient, settings: Setting
     analyzer = build_analyzer(db, client)
     compare = "Compare Miami and Houston in terms of hurricane and flood exposure."
 
-    # X1 — primary LLM down: the fallback provider answers; numbers unchanged.
-    if settings.gemini_api_key or not settings.llm_fallback_model.startswith("gemini/"):
-        broken = settings.model_copy(update={"llm_model": "groq/eval-fault-no-such-model"})
-        reference = await Agent(db, analyzer, settings).answer_plan(
-            build_plan({"intent": "compare", "hubs": ["miami", "houston"], "hazards": ["hurricane", "flood"]}),
-            compare, use_llm=False)
-        await case("X1", "primary LLM model unavailable", compare, Agent(db, analyzer, broken), lambda a: expect(
-            (a["intent"] == "compare", f"intent {a['intent']}"),
-            ((a["meta"].get("planner") or {}).get("fallback_used") is True, "planner did not fall back"),
-            (a["table"] == reference.model_dump(mode="json")["table"], "numbers differ from the code's result")))
-    else:
-        results.append({"id": "X1", "group": "Failures", "fault": "primary LLM model unavailable", "passed": True,
-                        "skipped": "no GEMINI_API_KEY for the fallback", "failures": [], "latency_ms": 0})
+    if want("X1"):  # primary LLM down: the fallback provider answers; numbers unchanged
+        if settings.gemini_api_key or not settings.llm_fallback_model.startswith("gemini/"):
+            broken = settings.model_copy(update={"llm_model": "groq/eval-fault-no-such-model"})
+            reference = (await Agent(db, analyzer, settings).answer_plan(
+                build_plan({"intent": "compare", "hubs": ["miami", "houston"], "hazards": ["hurricane", "flood"]}),
+                compare, use_llm=False)).model_dump(mode="json")
+            await case("X1", "primary LLM model unavailable", compare, Agent(db, analyzer, broken), lambda a: expect(
+                (a["intent"] == "compare", f"intent {a['intent']}"),
+                ((a["meta"].get("planner") or {}).get("fallback_used") is True, "planner did not fall back"),
+                (a["table"] == reference["table"], "numbers differ from the code's result")))
+        else:
+            results.append({"id": "X1", "group": "Failures", "fault": "primary LLM model unavailable", "passed": True,
+                            "skipped": "no GEMINI_API_KEY for the fallback", "failures": [], "latency_ms": 0})
+    if want("X2"):  # every LLM down: a clear error answer, no crash, no invented numbers
+        dead = settings.model_copy(update={"llm_model": "groq/eval-fault-no-such-model",
+                                           "llm_fallback_model": "gemini/eval-fault-no-such-model"})
+        await case("X2", "all LLM models unavailable", compare, Agent(db, analyzer, dead), lambda a: expect(
+            (a["intent"] == "error", f"intent {a['intent']}"), (a["table"] == [], "a table was returned"),
+            (a["uncertainty"]["level"] == "high", "uncertainty not high"), (bool(a["reasoning"]), "no reason given")))
+    if want("X3"):
+        await _open_meteo_down(case, expect, settings)
+    if want("X4"):
+        await _nri_down(case, expect, db, settings, compare)
+    return results
 
-    # X2 — every LLM down: a clear error answer, no crash, no invented numbers.
-    dead = settings.model_copy(update={"llm_model": "groq/eval-fault-no-such-model",
-                                       "llm_fallback_model": "gemini/eval-fault-no-such-model"})
-    await case("X2", "all LLM models unavailable", compare, Agent(db, analyzer, dead), lambda a: expect(
-        (a["intent"] == "error", f"intent {a['intent']}"), (a["table"] == [], "a table was returned"),
-        (a["uncertainty"]["level"] == "high", "uncertainty not high"), (bool(a["reasoning"]), "no reason given")))
 
-    # X3 — Open-Meteo unreachable (fresh cache): nothing ranked as if complete; the gap is reported.
+async def _open_meteo_down(case, expect, settings: Settings) -> None:
+    """X3 — Open-Meteo unreachable (fresh cache): nothing ranked as if complete; the gap is reported."""
     tmp = Path(tempfile.mkdtemp(prefix="eval-fault-"))
     fresh = Database(f"sqlite+aiosqlite:///{tmp / 'fault.db'}")
     await fresh.create_all()
@@ -214,18 +233,21 @@ async def fault_cases(db: Database, client: httpx.AsyncClient, settings: Setting
     await fresh.dispose()
     shutil.rmtree(tmp, ignore_errors=True)
 
-    # X4 — FEMA NRI unreachable (weather cached): hurricane can't be scored and the answer says so.
+
+async def _nri_down(case, expect, db: Database, settings: Settings, compare: str) -> None:
+    """X4 — FEMA NRI unreachable (weather cached): hurricane can't be scored, so no combined comparison."""
     async with db.engine.begin() as conn:
         await conn.execute(text("DELETE FROM http_cache WHERE key = 'nri'"))
     async with make_client(settings.contact_email, transport=FailingHosts({ARCGIS})) as down:
         await case("X4", "FEMA NRI unreachable", compare, Agent(db, build_analyzer(db, down), settings),
                    lambda a: expect(
                        (a["intent"] == "compare", f"intent {a['intent']}"),
-                       (all(r.get("Hurricane") is None for r in a["table"]), "hurricane scored without NRI"),
+                       (len(a["table"]) == 2 and all(r.get("Hurricane / tropical storm") is None
+                                                     and r.get("combined") is None for r in a["table"]),
+                        "hurricane or a combined score was computed without NRI"),
                        (a["uncertainty"]["level"] == "high", "uncertainty not high"),
                        (any("National Risk Index" in r for r in a["uncertainty"]["reasons"]),
                         "the outage is not reported")))
-    return results
 
 
 # -- runner --------------------------------------------------------------------------------
@@ -266,9 +288,13 @@ async def main(only: set[str] | None, pause: float, cache: str | None) -> int:
             fetch_s = round(time.perf_counter() - t0, 1)
             incomplete = [h for h, bd in exposure.breakdowns.items() if not bd["meta"]["observed_window"]["complete"]]
             print(f"Data ready in {fetch_s} s · NRI {exposure.nri_version} · incomplete weather: "
-                  f"{', '.join(incomplete) or 'none'}\n", flush=True)
+                  f"{', '.join(incomplete) or 'none'}", flush=True)
+            for h in incomplete:  # e.g. a download that failed; the next request retries the missing year
+                for gap in exposure.breakdowns[h]["data_gaps"]:
+                    print(f"  {h}: {gap}", flush=True)
+            print(flush=True)
 
-            for i, case in enumerate(cases):
+            for i, case in enumerate(c for c in cases if not c["id"].startswith("X")):
                 if i and pause:
                     await asyncio.sleep(pause)  # Groq free tier: 8K tokens/min
                 result = await run_case(case, agent, pause)
@@ -278,9 +304,9 @@ async def main(only: set[str] | None, pause: float, cache: str | None) -> int:
                       f"{result['latency_ms']:>6} ms  {explained_by:8}  turns {len(result['turns'])}", flush=True)
                 for failure in result["failures"]:
                     print(f"        - {failure}", flush=True)
-            if not only:
+            if not only or any(cid.startswith("X") for cid in only):
                 print("\nFault injection:", flush=True)
-                for result in await fault_cases(db, client, settings):
+                for result in await fault_cases(db, client, settings, only):
                     results.append(result)
                     status = "SKIP" if result.get("skipped") else "PASS" if result["passed"] else "FAIL"
                     print(f"{status}  {result['id']:3} {result['fault']:32} {result['latency_ms']:>6} ms"
@@ -306,7 +332,9 @@ async def main(only: set[str] | None, pause: float, cache: str | None) -> int:
         "llm_explanations": sum(t["explanation_source"] == "llm" for t in turns),
         "template_explanations": sum(t["explanation_source"] == "template" for t in turns),
         "provider_fallbacks": sum(bool(t["fallback_used"]) for t in turns),
-        "faults_passed": f"{sum(r['passed'] for r in results if 'fault' in r)}/{sum('fault' in r for r in results)}",
+        "faults_passed": f"{sum(r['passed'] and not r.get('skipped') for r in results if 'fault' in r)}/"
+                         f"{sum('fault' in r for r in results)}",
+        "faults_inconclusive": sum(bool(r.get("skipped")) for r in results if "fault" in r),
         "latency_p50_ms": sorted(r["latency_ms"] for r in flow)[len(flow) // 2] if flow else None,
     }
     print("\n" + "  ".join(f"{k}={v}" for k, v in summary.items()))

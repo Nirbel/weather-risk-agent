@@ -4,7 +4,8 @@ family score = weighted mean of its evidence lenses (observed weather, modeled N
                renormalized over the lenses that exist by design or loaded successfully;
 overall      = weighted mean of family scores (equal weights by default).
 Incomplete weather (config coverage rule, D24) is not renormalized away: a family that uses
-observed weather gets no score, and neither does the overall, so the hub is not ranked on them.
+observed weather gets no score. The overall needs every family, so a hub with any unscored
+family (incomplete weather, or no evidence at all) is not ranked overall.
 Every intermediate value is kept in the returned breakdown so "why" answers can cite it.
 """
 
@@ -92,13 +93,12 @@ def score_family(name: str, inputs: HubInputs, cfg: ScoringConfig) -> dict:
 
 
 def overall_score(breakdown: dict, family_weights: dict[str, float], families: list[str] | None = None) -> float | None:
-    """Weighted mean of family scores. None if any requested family has incomplete weather data;
-    a family with no evidence at all (e.g. NRI down) is skipped and reported as a data gap."""
+    """Weighted mean of family scores. None if any requested family has no score — incomplete
+    weather, or no evidence at all (e.g. FEMA NRI down) — so a hazard is never silently dropped."""
     families = families or list(family_weights)
-    if any(breakdown["families"].get(f, {}).get("incomplete") for f in families):
+    if any(breakdown["families"].get(f, {}).get("score") is None for f in families):
         return None
-    pairs = [(family_weights.get(f, 0.0), breakdown["families"][f]["score"])
-             for f in families if breakdown["families"].get(f, {}).get("score") is not None]
+    pairs = [(family_weights.get(f, 0.0), breakdown["families"][f]["score"]) for f in families]
     total = sum(w for w, _ in pairs)
     if not pairs or total <= 0:
         return None

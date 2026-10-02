@@ -116,7 +116,8 @@ def test_missing_nri_is_flagged_and_weights_renormalize():
     assert winter["missing_weight_share"] == pytest.approx(0.5)
     assert result["families"]["hurricane"]["score"] is None
     assert any("FEMA National Risk Index" in gap for gap in result["data_gaps"])
-    assert result["score"] == pytest.approx(50)  # overall over the families that have evidence
+    # Hurricane has no evidence at all, so an overall score would silently drop a hazard: none is given.
+    assert result["score"] is None
 
 
 def test_missing_weather_makes_weather_families_unscorable():
@@ -145,6 +146,9 @@ def test_overall_score_needs_every_requested_family_complete():
     breakdown = {"families": {"winter": {"score": None, "incomplete": True}, "hurricane": {"score": 60.0}}}
     assert exposure.overall_score(breakdown, {"winter": 1, "hurricane": 1}) is None
     assert exposure.overall_score(breakdown, {"winter": 1, "hurricane": 1}, ["hurricane"]) == 60
+    no_evidence = {"families": {"winter": {"score": 40.0}, "hurricane": {"score": None}}}
+    assert exposure.overall_score(no_evidence, {"winter": 1, "hurricane": 1}) is None
+    assert exposure.overall_score(no_evidence, {"winter": 1, "hurricane": 1}, ["winter"]) == 40
 
 
 def test_overall_is_equal_weight_mean_and_names_top_family():

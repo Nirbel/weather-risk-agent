@@ -99,8 +99,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
             with contextlib.suppress(asyncio.CancelledError):
                 await scheduler
         await client.aclose()
-        if db is None:
-            await app.state.db.dispose()
+        await app.state.db.dispose()
 
     app = FastAPI(title="Weather Risk Intelligence Agent", version="0.2.0", lifespan=lifespan,
                   description="Ranks, compares and explains the weather-disruption exposure of US logistics hubs.")

@@ -21,8 +21,8 @@ def _source_reasons(key: str, status: dict) -> list[tuple[str, str]]:
     if not success:
         return [("high", f"{name}: no successful download yet, so this evidence is missing.")]
     if error_at and error_at > success:
-        return [("medium", f"{name}: the latest refresh failed ({status.get('last_error')}); "
-                           f"using data retrieved {success}.")]
+        return [("medium", f"{name}: the latest download failed ({status.get('last_error')}); "
+                           f"the last successful one was {success}.")]
     return []
 
 

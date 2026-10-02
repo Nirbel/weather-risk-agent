@@ -191,3 +191,22 @@ async def test_stat_with_a_two_day_gap_is_still_answered():
     ctx = ExecContext(analyzer=FakeAnalyzer(missing_days={"denver": missing}))
     b = await execute(plan(intent="stat", hubs=["denver"], metric="snowfall_days", time_preset="last_calendar_year"), ctx)
     assert (b.rows[0]["days meeting threshold"], b.rows[0]["days with data"], b.rows[0]["% of days"]) == (28, 363, 7.7)
+
+
+async def test_a_hazard_with_no_evidence_is_not_silently_dropped():
+    # FEMA NRI unreachable: hurricane has no evidence at all. A "hurricane + flood" comparison must not
+    # quietly become a flood-only comparison.
+    ctx = ExecContext(analyzer=FakeAnalyzer(no_evidence={"hurricane"}))
+    b = await execute(plan(intent="compare", hubs=["miami", "houston"], hazards=["hurricane", "flood"]), ctx)
+    assert b.headline.startswith("I can't compare") and "FEMA National Risk Index" in b.headline
+    assert {r["hub"]: r["Flood"] for r in b.rows} == {"Miami": 60.0, "Houston": 75.0}  # still shown
+    assert all(r["combined"] is None for r in b.rows)
+    assert b.uncertainty[0][0] == "high"
+
+
+async def test_ranking_on_a_hazard_with_no_evidence_ranks_nobody():
+    ctx = ExecContext(analyzer=FakeAnalyzer(no_evidence={"hurricane"}))
+    b = await execute(plan(hazards=["hurricane"]), ctx)
+    assert b.headline.startswith("No hub can be ranked") and all(r["rank"] is None for r in b.rows)
+    flood = await execute(plan(hazards=["flood"]), ctx)  # other hazards still rank normally
+    assert flood.rows[0]["rank"] == 1

@@ -1,6 +1,7 @@
 """API routes and auth with a fake Analyzer and a fake LLM (no network, no keys)."""
 
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -47,8 +48,8 @@ async def public_dns(host: str, port: int) -> list[str]:
 
 @pytest.fixture
 def make_client():
-    def factory(*outcomes, settings=SETTINGS, transcription=None, analyzer=None, db=None):
-        app = create_app(settings, db=db or Database("sqlite+aiosqlite:///:memory:"),
+    def factory(*outcomes, settings=SETTINGS, transcription=None, analyzer=None):
+        app = create_app(settings, db=Database("sqlite+aiosqlite:///:memory:"),
                          analyzer=analyzer or FakeAnalyzer(), completion=FakeCompletion(*outcomes),
                          transcription=transcription or FakeTranscription(), resolve=public_dns)
         return TestClient(app)
@@ -134,21 +135,27 @@ def test_duplicate_signup_and_short_password_are_rejected(make_client):
         assert client.post("/auth/signup", json={"email": BEN[0], "password": "1234567"}).status_code == 422
 
 
-def test_passwords_are_stored_hashed(make_client):
-    db = Database("sqlite+aiosqlite:///:memory:")
-    with make_client(db=db) as client:
+def file_app(tmp_path, settings=SETTINGS):
+    """An app that opens (and disposes) its own SQLite file, as in production."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+    return TestClient(create_app(settings.model_copy(update={"database_url": url}), analyzer=FakeAnalyzer(),
+                                 completion=FakeCompletion(), resolve=public_dns))
+
+
+def test_passwords_are_stored_hashed(tmp_path):
+    with file_app(tmp_path) as client:
         client.post("/auth/signup", json={"email": ANA[0], "password": ANA[1]})
-        stored = {email: client.portal.call(db.get_account, email)["password_hash"] for email in (ADMIN[0], ANA[0])}
+    with sqlite3.connect(tmp_path / "app.db") as conn:
+        stored = dict(conn.execute("SELECT email, password_hash FROM users"))
     for email, password in (ADMIN, ANA):
         assert stored[email].startswith("scrypt$") and password not in stored[email]
 
 
-def test_demo_admin_password_follows_the_setting(make_client):
-    db = Database("sqlite+aiosqlite:///:memory:")
-    with make_client(db=db) as client:  # first start: created with 12345678
+def test_demo_admin_password_follows_the_setting(tmp_path):
+    with file_app(tmp_path) as client:  # first start: created with 12345678
         assert login(client, *ADMIN).status_code == 200
     rotated = SETTINGS.model_copy(update={"demo_admin_password": "a-new-long-password"})
-    with make_client(db=db, settings=rotated) as client:  # restart with DEMO_ADMIN_PASSWORD changed
+    with file_app(tmp_path, rotated) as client:  # restart with DEMO_ADMIN_PASSWORD changed
         assert login(client, *ADMIN).status_code == 401
         assert login(client, ADMIN[0], "a-new-long-password").json()["role"] == "admin"
 

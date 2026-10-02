@@ -125,24 +125,39 @@ def _drivers(bd: dict, families: list[str], n: int = 3) -> list[str]:
 
 # -- coverage rule (config/scoring.yaml → coverage, D24) ---------------------------------
 
+# A requested hazard without a score (incomplete weather, or its only source down) blocks the hub:
+# it is not ranked, compared or scored on that combination, and the answer says why.
+
 def _blocked(bd: dict, families: list[str]) -> bool:
-    """A requested family can't be scored because the hub's weather fails the coverage rule."""
-    return any(bd["families"][f].get("incomplete") for f in families)
+    return any(bd["families"][f]["score"] is None for f in families)
 
 
-def _problems(bd: dict) -> str:
+def _coverage_problems(bd: dict) -> str:
     return " and ".join(bd.get("meta", {}).get("observed_window", {}).get("problems") or []) \
         or "the weather record is incomplete"
 
 
+def _why_unscored(ctx: ExecContext, bd: dict, families: list[str]) -> str:
+    """'incomplete weather data (…)' or 'no evidence for hurricane: FEMA National Risk Index unavailable'."""
+    missing = [f for f in families if bd["families"][f]["score"] is None]
+    if any(bd["families"][f].get("incomplete") for f in missing):
+        return f"incomplete weather data ({_coverage_problems(bd)})"
+    sources = sorted({lens["source"] for f in missing for name, lens in bd["families"][f]["lenses"].items()
+                      if name in bd["families"][f]["missing_lenses"]})
+    return (f"no evidence for {', '.join(ctx.short_label(f).lower() for f in missing)}: "
+            f"{' and '.join(sources) or 'its data source'} unavailable")
+
+
 def _rule(ctx: ExecContext) -> str:
     rule = ctx.cfg.coverage
-    return (f"A score needs at least {rule.min_pct:g}% of days with data and no gap longer than "
+    return (f" A score needs at least {rule.min_pct:g}% of days with data and no gap longer than "
             f"{rule.max_gap_days} days.")
 
 
-def _blocked_reason(ctx: ExecContext, hub_id: str, bd: dict, verb: str) -> tuple[str, str]:
-    return ("high", f"{ctx.name(hub_id)} is {verb}: its weather data is incomplete ({_problems(bd)}). {_rule(ctx)}")
+def _blocked_reason(ctx: ExecContext, hub_id: str, bd: dict, families: list[str], verb: str) -> tuple[str, str]:
+    incomplete = any(bd["families"][f].get("incomplete") for f in families)
+    return ("high", f"{ctx.name(hub_id)} is {verb}: {_why_unscored(ctx, bd, families)}."
+                    + (_rule(ctx) if incomplete else ""))
 
 
 def _names(ctx: ExecContext, hub_ids: list[str]) -> str:
@@ -213,16 +228,17 @@ async def _rank(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
     breakdowns = exposure.breakdowns
     blocked = [h for h in hub_ids if _blocked(breakdowns[h], families)]
     blocked_rows = [{"rank": None, "hub": ctx.name(h), "score": None,
-                     "note": f"Not ranked: incomplete weather data ({_problems(breakdowns[h])})"} for h in blocked]
-    blocked_reasons = [_blocked_reason(ctx, h, breakdowns[h], "not ranked") for h in blocked]
+                     "note": f"Not ranked: {_why_unscored(ctx, breakdowns[h], families)}"} for h in blocked]
+    blocked_reasons = [_blocked_reason(ctx, h, breakdowns[h], families, "not ranked") for h in blocked]
     scores = {h: s for h, bd in breakdowns.items()
               if h not in blocked and (s := overall_score(bd, weights, families)) is not None}
     if not scores:
         windows, sources, assumptions, gaps = _exposure_context(ctx, exposure, families)
         if blocked:
             return ResultBundle(
-                "rank", f"No hub can be ranked on {_hazard_phrase(families, ctx)}: the weather data is incomplete "
-                        f"for {_names(ctx, blocked)}.",
+                "rank", f"No hub can be ranked on {_hazard_phrase(families, ctx)}: "
+                        + "; ".join(f"{ctx.name(h)} — {_why_unscored(ctx, breakdowns[h], families)}"
+                                    for h in blocked[:3]) + ("; …" if len(blocked) > 3 else "") + ".",
                 rows=blocked_rows, details={"scope": scope, "not_ranked": [ctx.name(h) for h in blocked]},
                 points=[r for _, r in blocked_reasons], windows=windows, sources=sources, data_gaps=gaps,
                 uncertainty=blocked_reasons, assumptions=assumptions)
@@ -270,7 +286,7 @@ async def _rank(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
     headline = f"{ctx.name(top)} has the highest {_hazard_phrase(families, ctx)} among {scope} (score {r1(scores[top])}/100)"
     headline += f", followed by {runners}." if runners else "."
     if blocked:
-        headline += f" Not ranked (incomplete weather data): {_names(ctx, blocked)}."
+        headline += f" Not ranked (missing or incomplete data): {_names(ctx, blocked)}."
     drivers = {ctx.name(h): _drivers(breakdowns[h], families) for h in order[:check_k]}
     return ResultBundle(
         intent="rank", headline=headline, rows=rows,
@@ -300,7 +316,7 @@ async def _compare(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
         if len(families) > 1:
             row["combined"] = r1(combined.get(h))
         if h in blocked:
-            row["note"] = f"Not compared: incomplete weather data ({_problems(bds[h])})"
+            row["note"] = f"Not compared: {_why_unscored(ctx, bds[h], families)}"
         rows.append(row)
 
     differences, family_ties = [], []
@@ -319,13 +335,12 @@ async def _compare(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
             family_ties.append(f"On {ctx.short_label(f).lower()} alone, {ctx.name(lead)} and {ctx.name(second)} "
                                f"are within {gap:.1f} points — effectively tied.")
     windows, sources, assumptions, gaps = _exposure_context(ctx, exposure, families)
-    blocked_reasons = [_blocked_reason(ctx, h, bds[h], "not compared") for h in blocked]
+    blocked_reasons = [_blocked_reason(ctx, h, bds[h], families, "not compared") for h in blocked]
     if len(complete) < 2:
-        why = "; ".join(f"{ctx.name(h)}'s weather data is incomplete ({_problems(bds[h])})" for h in blocked)
+        why = "; ".join(f"{ctx.name(h)} — {_why_unscored(ctx, bds[h], families)}" for h in blocked)
         return ResultBundle(
             intent="compare", rows=rows,
-            headline=f"I can't compare {_names(ctx, hub_ids)} on {_hazard_phrase(families, ctx)}: {why}, "
-                     "so its score is not computed.",
+            headline=f"I can't compare {_names(ctx, hub_ids)} on {_hazard_phrase(families, ctx)}: {why}.",
             details={"hazards": [ctx.family_label(f) for f in families], "differences": differences,
                      "not_compared": [ctx.name(h) for h in blocked]},
             points=differences, windows=windows, sources=sources, data_gaps=gaps, uncertainty=blocked_reasons,
@@ -335,7 +350,7 @@ async def _compare(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
     others = " and ".join(f"{ctx.name(h)} ({r1(combined[h])})" for h in order[1:])
     headline = f"{ctx.name(order[0])} has the higher {_hazard_phrase(families, ctx)} ({r1(combined[order[0]])}/100) vs {others}."
     if blocked:
-        headline += f" Not compared (incomplete weather data): {_names(ctx, blocked)}."
+        headline += f" Not compared (missing or incomplete data): {_names(ctx, blocked)}."
     uncertainty = blocked_reasons + [("low", t) for t in family_ties]
     if gap < ctx.cfg.robustness.tie_margin:
         uncertainty.append(("medium", f"{ctx.name(order[0])} and {ctx.name(order[1])} are only {gap:.1f} points "
@@ -459,13 +474,14 @@ async def _explain(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
     gaps = bd.get("data_gaps", [])
     uncertainty = [("medium", g) for g in gaps]
     if _blocked(bd, families):
-        headline = (f"{ctx.name(hub)} is not scored on {_hazard_phrase(families, ctx)}: its weather data for "
-                    f"{exposure.start.year}–{exposure.end.year} is incomplete ({_problems(bd)}), so it is not ranked.")
-        nri_only = [f for f in shown if bd["families"][f]["score"] is not None]
-        if nri_only:
-            headline += " Hazards scored from FEMA NRI alone: " + ", ".join(
-                f"{ctx.short_label(f).lower()} {r1(bd['families'][f]['score'])}/100" for f in nri_only) + "."
-        uncertainty.insert(0, _blocked_reason(ctx, hub, bd, "not scored"))
+        headline = (f"{ctx.name(hub)} is not scored on {_hazard_phrase(families, ctx)} for "
+                    f"{exposure.start.year}–{exposure.end.year}: {_why_unscored(ctx, bd, families)}, "
+                    "so it is not ranked.")
+        scored = [f for f in shown if bd["families"][f]["score"] is not None]
+        if scored:
+            headline += " Hazards that could be scored: " + ", ".join(
+                f"{ctx.short_label(f).lower()} {r1(bd['families'][f]['score'])}/100" for f in scored) + "."
+        uncertainty.insert(0, _blocked_reason(ctx, hub, bd, families, "not scored"))
     elif len(families) < len(ctx.cfg.families):
         combined = overall_score(bd, ctx.cfg.family_weights, families)
         headline = (f"{ctx.name(hub)} scores {r1(combined)}/100 on {_hazard_phrase(families, ctx)}; the biggest "
