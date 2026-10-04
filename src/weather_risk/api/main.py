@@ -101,7 +101,10 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
         await client.aclose()
         await app.state.db.dispose()
 
-    app = FastAPI(title="Weather Risk Intelligence Agent", version="0.2.0", lifespan=lifespan,
+    # Behind a proxy that serves the API under a prefix (ROOT_PATH=/api), the docs must fetch
+    # /api/openapi.json and "Try it out" must call /api/…; root_path tells FastAPI the public prefix.
+    root_path = (settings or get_settings()).root_path.rstrip("/")
+    app = FastAPI(title="Weather Risk Intelligence Agent", version="0.2.0", lifespan=lifespan, root_path=root_path,
                   description="Ranks, compares and explains the weather-disruption exposure of US logistics hubs.")
 
     # -- auth --------------------------------------------------------------------------

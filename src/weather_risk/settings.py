@@ -43,6 +43,9 @@ class Settings(BaseSettings):
 
     # UI → API
     api_url: str = "http://localhost:8000"
+    # Public path prefix when a reverse proxy serves the API under a sub-path and strips it,
+    # e.g. "/api" for https://example.com/api/docs. Empty when the API is served at the root.
+    root_path: str = ""
 
 
 @lru_cache

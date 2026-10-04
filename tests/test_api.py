@@ -358,3 +358,24 @@ def test_weak_jwt_secret_is_replaced_with_a_random_one(make_client):
         weak = issue_token(User(email=ADMIN[0], role="admin"), SETTINGS.model_copy(update={"jwt_secret": "change-me"}))
         assert client.get("/hubs", headers=bearer(weak)).status_code == 401  # can't forge with the weak secret
         assert client.get("/hubs", headers=bearer(token)).status_code == 200
+
+
+# -- behind a reverse proxy that serves the API under a path prefix (e.g. /api) -------------
+
+def test_docs_work_behind_a_path_prefix_proxy():
+    # The proxy forwards /api/* to the backend with the prefix stripped. Without root_path the docs page
+    # asks the browser for "/openapi.json", which on the public domain is the UI, not the spec.
+    settings = SETTINGS.model_copy(update={"root_path": "/api"})
+    app = create_app(settings, db=Database("sqlite+aiosqlite:///:memory:"), analyzer=FakeAnalyzer(),
+                     completion=FakeCompletion(), resolve=public_dns)
+    with TestClient(app) as client:
+        docs = client.get("/docs").text
+        spec = client.get("/openapi.json").json()
+        assert client.get("/health").status_code == 200  # prefix already stripped by the proxy
+    assert "url: '/api/openapi.json'" in docs
+    assert spec["openapi"].startswith("3.") and spec["servers"] == [{"url": "/api"}]  # "Try it out" → /api/…
+
+
+def test_no_prefix_by_default(make_client):
+    with make_client() as client:
+        assert "url: '/openapi.json'" in client.get("/docs").text

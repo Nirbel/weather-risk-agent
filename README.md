@@ -197,6 +197,7 @@ recorded data with no network.
 | `ALLOW_PRIVATE_WEBHOOKS` | `true` lets users target private or loopback hosts (default `false`) |
 | `ALERT_TRIGGER_SECRET` | Lets an external cron call `POST /alerts/run` with header `X-Alert-Secret` |
 | `DATABASE_URL` | Default `sqlite+aiosqlite:///data/app.db` (the folder is created automatically) |
+| `ROOT_PATH` | Public path prefix when a reverse proxy serves the API under a sub-path, e.g. `/api` (then the docs are at `/api/docs`) |
 
 ## Data and licenses
 
