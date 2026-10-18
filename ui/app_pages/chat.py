@@ -1,5 +1,8 @@
 """Chat with the agent. The sidebar holds conversation history only."""
 
+import html
+import re
+
 import pandas as pd
 import streamlit as st
 
@@ -13,6 +16,48 @@ SUGGESTIONS = {
     ":material/weather_snowy: Denver snow days": "What percentage of days in Denver last year had snowfall?",
     ":material/thunderstorm: Why Dallas?": "Why is the Dallas hub's weather disruption risk high?",
 }
+
+
+RTL = re.compile(r"[\u0590-\u05FF\u0600-\u06FF]")  # Hebrew and Arabic letters
+# The chat's own labels; the answer's text comes from the API in its `language` (en or he).
+UI = {
+    "en": {"uncertainty": "Uncertainty", "low": "low", "medium": "medium", "high": "high",
+           "context": "Assumptions, sources and time window", "assumptions": "Assumptions",
+           "no_assumptions": "None beyond the computed result.", "window": "Time window", "not_applicable": "Not applicable",
+           "sources": "Sources", "no_sources": "None (nothing computed)", "retrieved": "retrieved",
+           "how": "How this was computed", "llm": "LLM, grounding-checked", "template": "deterministic template",
+           "numbers": "Numbers: deterministic Python", "explanation": "explanation",
+           "plan": "**Query plan** (LLM output, schema-validated)", "details": "**Result details**"},
+    "he": {"uncertainty": "אי-ודאות", "low": "נמוכה", "medium": "בינונית", "high": "גבוהה",
+           "context": "הנחות, מקורות וחלון זמן", "assumptions": "הנחות",
+           "no_assumptions": "אין, מעבר לתוצאה המחושבת.", "window": "חלון זמן", "not_applicable": "לא רלוונטי",
+           "sources": "מקורות", "no_sources": "אין (לא חושב דבר)", "retrieved": "נשלף",
+           "how": "איך זה חושב", "llm": "LLM, עם בדיקת עיגון", "template": "תבנית דטרמיניסטית",
+           "numbers": "מספרים: Python דטרמיניסטי", "explanation": "הסבר",
+           "plan": "**תוכנית השאילתה** (פלט LLM, נבדק מול סכמה)", "details": "**פרטי התוצאה**"},
+}
+
+
+def write_text(text: str) -> None:
+    """Markdown, or a right-to-left block when the answer is in Hebrew or Arabic."""
+    if RTL.search(text):
+        text = "• " + text[2:] if text.startswith("- ") else text
+        st.html(f'<div dir="rtl" style="text-align: right">{html.escape(text)}</div>')
+    else:
+        st.markdown(text.replace("$", r"\$"))  # "$807 per $1M" must not render as LaTeX
+
+
+def bullets(items: list[str], rtl: bool, title: str | None = None) -> None:
+    """A list; right-to-left as one HTML block (items are escaped, except prepared links)."""
+    if not rtl:
+        if title:
+            st.markdown(f"**{title}**")
+        for item in items:
+            st.markdown(f"- {item}".replace("$", r"\$"))
+        return
+    head = f"<b>{html.escape(title)}</b>" if title else ""
+    st.html(f'<div dir="rtl" style="text-align: right">{head}<ul>'
+            + "".join(f"<li>{item}</li>" for item in items) + "</ul></div>")
 
 
 def start_new_chat() -> None:
@@ -31,40 +76,44 @@ def open_conversation(conversation_id: str) -> None:
 
 
 def render_answer(answer: dict, key: str, latest: bool) -> None:
-    st.markdown(answer["answer"])
+    lang = answer.get("language", "en")  # answers stored before i18n have no language
+    t, rtl = UI.get(lang, UI["en"]), lang == "he"
+    esc = html.escape if rtl else (lambda x: x)
+    write_text(answer["answer"])
     for point in answer["reasoning"]:
-        st.markdown(f"- {point}")
+        write_text(f"- {point}")
     if answer["table"]:
-        st.dataframe(pd.DataFrame(answer["table"]), hide_index=True)
+        st.dataframe(pd.DataFrame(answer["table"]).rename(columns=answer.get("column_labels") or {}), hide_index=True)
 
     level = answer["uncertainty"]["level"]
     color, icon = LEVEL[level]
-    with st.expander(f"Uncertainty: {level}", icon=icon, expanded=level == "high"):
-        st.badge(level, color=color, icon=icon)
-        for reason in answer["uncertainty"]["reasons"]:
-            st.markdown(f"- {reason}")
-    with st.expander("Assumptions, sources and time window", icon=":material/fact_check:"):
-        st.markdown("**Assumptions**")
-        for a in answer["assumptions"] or ["None beyond the computed result."]:
-            st.markdown(f"- {a}")
-        st.markdown("**Time window**")
-        for w in answer["time_windows"] or [{"label": "Not applicable", "start": None, "end": None}]:
+    with st.expander(f"{t['uncertainty']}: {t[level]}", icon=icon, expanded=level == "high"):
+        st.badge(t[level], color=color, icon=icon)
+        bullets([esc(r) for r in answer["uncertainty"]["reasons"]], rtl)
+    with st.expander(t["context"], icon=":material/fact_check:"):
+        bullets([esc(a) for a in answer["assumptions"] or [t["no_assumptions"]]], rtl, t["assumptions"])
+        windows = []
+        for w in answer["time_windows"] or [{"label": t["not_applicable"], "start": None, "end": None}]:
             dates = f": {w['start'] or '…'} → {w['end'] or '…'}" if w["start"] or w["end"] else ""
-            st.markdown(f"- {w['label']}{dates}")
-        st.markdown("**Sources**")
-        for s in answer["sources"] or [{"name": "None (nothing computed)", "url": "", "retrieved_at": None}]:
-            link = f"[{s['name']}]({s['url']})" if s["url"] else s["name"]
-            st.markdown(f"- {link} — retrieved {s['retrieved_at'] or 'n/a'}" + (f" · {s['detail']}" if s.get("detail") else ""))
-    with st.expander("How this was computed", icon=":material/function:"):
+            windows.append(esc(f"{w['label']}{dates}"))
+        bullets(windows, rtl, t["window"])
+        sources = []
+        for s in answer["sources"] or [{"name": t["no_sources"], "url": "", "retrieved_at": None}]:
+            name = (f'<a href="{html.escape(s["url"])}">{html.escape(s["name"])}</a>' if rtl else
+                    f"[{s['name']}]({s['url']})") if s["url"] else esc(s["name"])
+            detail = f" · {esc(s['detail'])}" if s.get("detail") else ""
+            sources.append(f"{name} — {t['retrieved']} {esc(s['retrieved_at'] or 'n/a')}{detail}")
+        bullets(sources, rtl, t["sources"])
+    with st.expander(t["how"], icon=":material/function:"):
         meta = answer["meta"] or {}
         planner, explainer = meta.get("planner") or {}, meta.get("explainer") or {}
-        explained_by = "LLM, grounding-checked" if meta.get("explanation_source") == "llm" else "deterministic template"
-        st.caption(f"Numbers: deterministic Python · explanation: {explained_by} · planner: {planner.get('model')} · "
+        explained_by = t["llm"] if meta.get("explanation_source") == "llm" else t["template"]
+        st.caption(f"{t['numbers']} · {t['explanation']}: {explained_by} · planner: {planner.get('model')} · "
                    f"explainer: {explainer.get('model')} · {meta.get('latency_ms')} ms")
-        st.markdown("**Query plan** (LLM output, schema-validated)")
+        st.markdown(t["plan"])
         st.json({k: v for k, v in (answer["query_plan"] or {}).items() if v not in (None, [])}, expanded=False)
         if answer["breakdown"]:
-            st.markdown("**Result details**")
+            st.markdown(t["details"])
             st.json(answer["breakdown"], expanded=False)
     if latest and answer["suggested_follow_ups"]:
         choice = st.pills("Follow up", answer["suggested_follow_ups"], key=f"follow-{key}",
@@ -82,13 +131,18 @@ def ask(prompt: str) -> None:
         with st.status(":shimmer[Planning the query, computing, explaining]", type="compact") as status:
             response = api_client.request("POST", "/chat", json={
                 "message": prompt, "conversation_id": st.session_state.conversation_id})
-            if response is None or response.status_code != 200:
+            body = response.json() if response is not None and "json" in response.headers.get("content-type", "") \
+                else {}
+            if response is None or "intent" not in body:  # transport error, not an AgentAnswer
                 status.update(label="Request failed", state="error")
                 detail = response.text[:300] if response is not None else "API unreachable"
                 st.session_state.messages.append({"role": "error", "content": detail})
                 return
-            answer = response.json()
-            status.update(label=f"Answered in {answer['meta'].get('latency_ms', 0) / 1000:.1f} s", state="complete")
+            answer = body  # 200, or 422/503 with an error answer that is stored in the conversation too
+            failed = response.status_code != 200
+            status.update(label="Could not answer" if failed else
+                          f"Answered in {answer['meta'].get('latency_ms', 0) / 1000:.1f} s",
+                          state="error" if failed else "complete")
     st.session_state.conversation_id = answer["conversation_id"]
     st.session_state.messages.append({"role": "assistant", "answer": answer})
     st.rerun()

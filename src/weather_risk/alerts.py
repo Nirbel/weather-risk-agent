@@ -14,6 +14,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -171,6 +172,13 @@ class AlertService:
         log.info("alert check: %d subscriber(s), %d notified", len(users), sum(u["changes"] > 0 for u in users))
         return {"checked_at": checked_at, "window": window, "skipped": skipped, "users": users}
 
+    async def run_scheduled(self, holder: str, every_s: float) -> dict | None:
+        """A scheduled check, unless another API process sharing the database already ran this one
+        (None). The lease lasts just under the interval, so the holder renews it on its next tick."""
+        if not await self.db.try_lease("alert_check", holder, ttl_s=every_s * 0.9):
+            return None
+        return await self.run()
+
     async def send_test(self, email: str) -> dict:
         """Post a sample payload to the user's saved webhook, even while alerts are off."""
         cfg = await self.config(email)
@@ -198,10 +206,15 @@ class AlertService:
 async def run_on_schedule(service: AlertService, every_hours: float, first_delay_s: float = 30.0) -> None:
     """In-process scheduler: the first check (shortly after startup) records a baseline and warms the cache."""
     await asyncio.sleep(first_delay_s)
+    holder = uuid.uuid4().hex  # this process, for the shared lease
     while True:
         try:
-            result = await service.run()
-            log.info("scheduled alert check: %s", result["status"])
+            result = await service.run_scheduled(holder, every_hours * 3600)
+            if result is None:
+                log.info("scheduled alert check skipped: another API process ran it")
+            else:
+                log.info("scheduled alert check done at %s (%d subscriber(s))", result["checked_at"],
+                         len(result["users"]))
         except Exception:
             log.exception("scheduled alert check failed")
         await asyncio.sleep(every_hours * 3600)

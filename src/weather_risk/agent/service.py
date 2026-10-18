@@ -6,6 +6,7 @@ from dataclasses import asdict
 from weather_risk.agent.answer import assemble, error_answer
 from weather_risk.agent.executor import ExecContext, execute
 from weather_risk.agent.explainer import explain, template_explanation
+from weather_risk.agent.i18n import detect_language
 from weather_risk.agent.llm import CallMeta, LLMError, LLMUnavailableError
 from weather_risk.agent.planner import plan_question
 from weather_risk.agent.schemas import AgentAnswer, QueryPlan
@@ -51,11 +52,14 @@ class Agent:
                 window=self.analyzer.window(), data_end=self.analyzer.data_end(), completion=self.completion,
             )
         except LLMError as exc:
-            kind = ("The language model is unavailable" if isinstance(exc, LLMUnavailableError)
-                    else "The model's query plan failed validation twice")
-            reason = f"{kind}: {str(exc).splitlines()[-1][:200]}"
+            unavailable, lang = isinstance(exc, LLMUnavailableError), detect_language(message)
+            what = ("The language model is unavailable" if unavailable else
+                    "The model's query plan failed validation twice") if lang == "en" else \
+                ("מודל השפה אינו זמין" if unavailable else "תוכנית השאילתה של המודל נכשלה בבדיקה פעמיים")
+            reason = f"{what}: {str(exc).splitlines()[-1][:200]}"
             answer = error_answer(reason, conversation_id, {"planner": _meta(exc.meta),
-                                                            "latency_ms": int((time.perf_counter() - started) * 1000)})
+                                                            "latency_ms": int((time.perf_counter() - started) * 1000)},
+                                  kind="llm_unavailable" if unavailable else "invalid_plan", lang=lang)
             await self.db.add_turn(conversation_id, message, None, answer.model_dump(mode="json"))
             return answer
         previous = history[-1]["user_text"] if history else None
@@ -67,9 +71,11 @@ class Agent:
     async def answer_plan(self, plan: QueryPlan, question: str, *, use_llm: bool, conversation_id: str | None = None,
                           planner_meta: CallMeta | None = None, started: float | None = None,
                           previous_question: str | None = None) -> AgentAnswer:
-        """Execute a plan and explain it. `use_llm=False` is the offline path (eval, Analytics)."""
+        """Execute a plan and explain it. `use_llm=False` is the offline path (eval, Analytics).
+        Code-built text follows the question's language (agent/i18n.py)."""
         started = started or time.perf_counter()
-        bundle = await execute(plan, ExecContext(self.analyzer))
+        lang = detect_language(question)
+        bundle = await execute(plan, ExecContext(self.analyzer, lang=lang))
         explainer_meta, source = None, "template"
         if use_llm and bundle.rows:
             explanation, explainer_meta, source = await explain(question, bundle, self.settings, self.completion,
@@ -78,4 +84,4 @@ class Agent:
             explanation = template_explanation(bundle)
         meta = {"planner": _meta(planner_meta), "explainer": _meta(explainer_meta), "explanation_source": source,
                 "latency_ms": int((time.perf_counter() - started) * 1000)}
-        return assemble(plan, bundle, explanation, await self.db.source_statuses(), meta, conversation_id)
+        return assemble(plan, bundle, explanation, await self.db.source_statuses(), meta, conversation_id, lang=lang)

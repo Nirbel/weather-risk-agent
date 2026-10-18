@@ -8,6 +8,7 @@ If either process exits, the other is stopped too, so you never end up with half
 
 import argparse
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -42,6 +43,10 @@ def wait_for_api(url: str, proc: subprocess.Popen, timeout: float = 60) -> bool:
 
 
 def main() -> int:
+    # SIGTERM (an IDE's stop button, `docker stop`, `kill`) must stop both children like Ctrl-C does;
+    # without this the process dies before `finally` runs and the UI is left running on its port.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda *_: sys.exit(0))
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--api-port", type=int, default=8000)
@@ -75,7 +80,7 @@ def main() -> int:
             time.sleep(0.5)
         print("[run] A process exited — stopping the other.", flush=True)
         return 1
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         return 0
     finally:
         for p in processes:

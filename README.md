@@ -50,11 +50,14 @@ uv run python scripts/run.py
 
 | What | Where |
 |---|---|
-| UI (Home · Chat · Analytics · Alerts) | http://localhost:8501 |
+| UI (Home · Chat · Analytics · How scoring works · Alerts) | http://localhost:8501 |
 | API and interactive docs | http://localhost:8000/docs |
 
-**Log in** with the demo admin **`admin@moveo.co.il`** / **`12345678`**, or use *Sign up* with any
-`@moveo.co.il` address (new accounts are analysts).
+**Log in** with the demo admin **`admin@example.co.il`** / **`12345678`**, or use *Sign up* with any
+`@example.co.il` address (new accounts are analysts). Set `SIGNUP_DOMAIN` to use your own domain.
+
+**How the score works:** the *How scoring works* page explains the strategy, the formulas and every
+threshold (read live from `config/scoring.yaml`), with a step-by-step worked example for any hub.
 
 **First answer:** data is fetched when a question needs it and then cached in `data/app.db` (created
 automatically). A cold cache takes about 3 minutes on Open-Meteo's free tier. The alert scheduler starts
@@ -75,8 +78,8 @@ score breakdown). The Analytics page charts the same numbers.
 
 | Who | How | Can |
 |---|---|---|
-| Demo admin | `admin@moveo.co.il` / `12345678` (created on first start) | Everything, plus *Check now* on the Alerts page |
-| Analyst | *Sign up* with an `@moveo.co.il` email (password ≥ 8 characters) | Chat, Analytics, their own alerts |
+| Demo admin | `admin@example.co.il` / `12345678` (created on first start) | Everything, plus *Check now* on the Alerts page |
+| Analyst | *Sign up* with an `@example.co.il` email (password ≥ 8 characters) | Chat, Analytics, their own alerts |
 
 - Passwords are stored as salted scrypt hashes.
 - Each user sees only their own conversations.
@@ -191,12 +194,14 @@ recorded data with no network.
 | `config/scoring.yaml` | Thresholds, anchors, weights, the coverage rule, stat definitions (validated at startup) |
 | `GROQ_API_KEY` / `GEMINI_API_KEY` | LLM keys (at least one) |
 | `LLM_MODEL` / `LLM_FALLBACK_MODEL` | Default `groq/openai/gpt-oss-20b` → `gemini/gemini-3.8-flash` |
-| `DEMO_ADMIN_EMAIL` / `DEMO_ADMIN_PASSWORD` | Demo admin, default `admin@moveo.co.il` / `12345678` |
-| `JWT_SECRET` | Signs login tokens; empty → a random one per start (users log in again after a restart) |
+| `SIGNUP_DOMAIN` | The only email domain that may sign up, default `example.co.il` |
+| `DEMO_ADMIN_EMAIL` / `DEMO_ADMIN_PASSWORD` | Demo admin, default `admin@example.co.il` / `12345678` |
+| `JWT_SECRET` | Signs login tokens; empty → a generated one, saved in `data/.jwt_secret` so logins survive restarts |
 | `ALERT_THRESHOLD` / `ALERT_CHECK_HOURS` | Default alert threshold (5 points) and check interval (24 h) |
 | `ALLOW_PRIVATE_WEBHOOKS` | `true` lets users target private or loopback hosts (default `false`) |
 | `ALERT_TRIGGER_SECRET` | Lets an external cron call `POST /alerts/run` with header `X-Alert-Secret` |
 | `DATABASE_URL` | Default `sqlite+aiosqlite:///data/app.db` (the folder is created automatically) |
+| `OPEN_METEO_CALLS_PER_MINUTE` | Open-Meteo calls per minute, per API process (default 400; with N processes use ~400 / N) |
 | `ROOT_PATH` | Public path prefix when a reverse proxy serves the API under a sub-path, e.g. `/api` (then the docs are at `/api/docs`) |
 
 ## Data and licenses

@@ -16,6 +16,7 @@ __pycache__/
 # Runtime data (fetched on demand and cached; test fixtures live in tests/fixtures/recorded/)
 data/app.db
 data/app.db-*
+data/.jwt_secret
 
 # Eval output
 eval/reports/

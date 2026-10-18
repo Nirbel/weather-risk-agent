@@ -79,3 +79,16 @@ async def test_yearly_indicators_for_analytics(services):
     assert sorted(yearly["years"]) == [2021, 2022, 2023, 2024, 2025]
     assert set(yearly["years"][2025]) == set(yearly["labels"])
     assert sum(y["extreme_cold_days"] for y in yearly["years"].values()) > 0
+
+
+async def test_a_hubs_score_does_not_depend_on_the_roster(services):
+    """Bug 12: removing a hub (e.g. "ignore Miami") must not move any other hub's score — only ranks.
+    Holds because observed indicators and NRI loss rates are both scored on fixed anchors (D26)."""
+    full = (await services.analyzer.exposure()).breakdowns
+    for removed in full:
+        rest = [h for h in full if h != removed]
+        partial = (await services.analyzer.exposure(rest)).breakdowns
+        for hub in rest:
+            assert partial[hub]["score"] == full[hub]["score"], (removed, hub)
+            assert {f: v["score"] for f, v in partial[hub]["families"].items()} == \
+                   {f: v["score"] for f, v in full[hub]["families"].items()}

@@ -45,7 +45,8 @@ from weather_risk.settings import Settings, get_settings, llm_configured
 from weather_risk.sources.http import make_client
 
 # Checks in cases.yaml that assume the recorded data or the template wording (offline mode only).
-DATA_DEPENDENT = {"top_hub", "order", "stat_matches_raw", "uncertainty_mentions", "headline_contains"}
+DATA_DEPENDENT = {"top_hub", "order", "stat_matches_raw", "uncertainty_mentions", "headline_contains",
+                  "score_below", "score_gap"}
 FIELD_GROUPS = {"intent": ("intent",), "hubs": ("hubs", "region"), "hazards": ("hazards",),
                 "time period": ("metric", "time_preset", "year")}
 OPEN_METEO, ARCGIS = "archive-api.open-meteo.com", "services.arcgis.com"

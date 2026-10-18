@@ -8,28 +8,28 @@ from weather_risk.api.auth import hash_password, normalize_email, signup_email_e
 # -- email ---------------------------------------------------------------------------
 
 def test_email_is_normalized_before_validation():
-    assert normalize_email("  Dana.Levi@MOVEO.CO.IL\n") == "dana.levi@moveo.co.il"
-    assert normalize_email("dana＠moveo.co.il") == "dana@moveo.co.il"  # full-width @ folds to "@" (NFKC)
+    assert normalize_email("  Dana.Levi@EXAMPLE.CO.IL\n") == "dana.levi@example.co.il"
+    assert normalize_email("dana＠example.co.il") == "dana@example.co.il"  # full-width @ folds to "@" (NFKC)
 
 
-@pytest.mark.parametrize("email", ["dana@moveo.co.il", "dana.levi+alerts@moveo.co.il", " DANA@Moveo.Co.Il "])
-def test_moveo_addresses_may_sign_up(email):
+@pytest.mark.parametrize("email", ["dana@example.co.il", "dana.levi+alerts@example.co.il", " DANA@Example.Co.Il "])
+def test_domain_addresses_may_sign_up(email):
     assert signup_email_error(normalize_email(email)) is None
 
 
 @pytest.mark.parametrize("email", [
-    "dana@moveo.co.il.attacker.com",  # domain only starts with moveo.co.il
-    "dana@sub.moveo.co.il",           # must end exactly with "@moveo.co.il"
-    "dana@xmoveo.co.il",
-    "dana@moveo.co.il@evil.com",      # the real domain is the part after the last "@"
-    "dana@moveo.co.il.",
-    "dana@moveo.co.іl",               # Cyrillic "і" look-alike: NFKC keeps it, so the domain differs
+    "dana@example.co.il.attacker.com",  # domain only starts with example.co.il
+    "dana@sub.example.co.il",           # must end exactly with "@example.co.il"
+    "dana@xexample.co.il",
+    "dana@example.co.il@evil.com",      # the real domain is the part after the last "@"
+    "dana@example.co.il.",
+    "dana@example.co.іl",               # Cyrillic "і" look-alike: NFKC keeps it, so the domain differs
     "dana@gmail.com",
-    "@moveo.co.il",
-    "da na@moveo.co.il",
-    ".dana@moveo.co.il",
-    "dana..levi@moveo.co.il",
-    '"dana"@moveo.co.il',
+    "@example.co.il",
+    "da na@example.co.il",
+    ".dana@example.co.il",
+    "dana..levi@example.co.il",
+    '"dana"@example.co.il',
     "dana",
     "",
 ])
@@ -38,7 +38,7 @@ def test_other_addresses_may_not_sign_up(email):
 
 
 def test_domain_error_names_the_allowed_domain():
-    assert "@moveo.co.il" in signup_email_error("dana@moveo.co.il.attacker.com")
+    assert "@example.co.il" in signup_email_error("dana@example.co.il.attacker.com")
 
 
 # -- passwords -----------------------------------------------------------------------

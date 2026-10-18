@@ -20,6 +20,9 @@ Intents:
 Rules:
 - "risk" or "exposure" means long-term exposure.
 - "most exposed to winter disruption" → rank with hazards ["winter"].
+- "Why are X and Y high/low/the top two?" (two or more named hubs) → compare with those hubs, not clarify. After a ranking, "why are the first two so high?" → compare the first two hubs of that ranking.
+- "All hubs except X" / "ignore X" / "without X" → rank with exclude_hubs [X] (and region if one is named); hubs stays null.
+- Questions may be in any language; plan them the same way, and write interpretation_notes, clarification_question and out_of_scope_reason in the question's language.
 - Set hazards whenever the question names a hazard: flooding/heavy rain → ["flood"], snow/ice/cold → ["winter"], hurricanes → ["hurricane"], tornadoes/hail/wind → ["severe_storm"], heat → ["heat"]. Use null only for overall or all-hazard questions.
 - Weight requests ("weight flood double") → weight_overrides with that family = 2 and the others null.
 - Follow-ups: earlier turns show the plans you produced. Resolve references ("it", "that hub", "the year before", "add Dallas") into a complete explicit plan and keep unchanged fields from the previous plan.

@@ -18,15 +18,16 @@ from weather_risk.settings import Settings
 HOOK = "https://hooks.example.com/weather"
 SETTINGS = Settings(jwt_secret="test-secret-that-is-at-least-32-bytes-long", groq_api_key="x",
                     scheduler_enabled=False, alert_threshold=5.0, alert_trigger_secret="cron-secret",
-                    demo_admin_email="admin@moveo.co.il", demo_admin_password="12345678")
-ADMIN = ("admin@moveo.co.il", "12345678")
-ANA = ("ana@moveo.co.il", "ana-password-1")
-BEN = ("ben@moveo.co.il", "ben-password-1")
+                    demo_admin_email="admin@example.co.il", demo_admin_password="12345678",
+                    jwt_secret_file=None)
+ADMIN = ("admin@example.co.il", "12345678")
+ANA = ("ana@example.co.il", "ana-password-1")
+BEN = ("ben@example.co.il", "ben-password-1")
 
 PLAN = json.dumps({"intent": "rank", "hubs": None, "region": "midwest", "hazards": ["winter"], "metric": None,
                    "top_k": 3, "time_preset": None, "year": None, "start_date": None, "end_date": None,
                    "weight_overrides": None, "interpretation_notes": [], "clarification_question": None,
-                   "out_of_scope_reason": None})
+                   "out_of_scope_reason": None, "exclude_hubs": None})
 EXPLANATION = json.dumps({"summary": "Minneapolis–St Paul ranks first (90).", "reasoning": ["Winter drives it."],
                           "suggested_follow_ups": []})
 
@@ -78,36 +79,36 @@ def auth(client, user=ANA) -> dict:
 def test_demo_admin_can_log_in(make_client):
     with make_client() as client:
         body = login(client, *ADMIN).json()
-    assert (body["email"], body["role"]) == ("admin@moveo.co.il", "admin") and body["token"]
+    assert (body["email"], body["role"]) == ("admin@example.co.il", "admin") and body["token"]
 
 
 def test_wrong_password_and_unknown_email_get_the_same_answer(make_client):
     with make_client() as client:
-        wrong = login(client, "admin@moveo.co.il", "123456789")
-        unknown = login(client, "nobody@moveo.co.il", "12345678")
+        wrong = login(client, "admin@example.co.il", "123456789")
+        unknown = login(client, "nobody@example.co.il", "12345678")
     assert wrong.status_code == unknown.status_code == 401
     assert wrong.json()["detail"] == unknown.json()["detail"] == "Invalid email or password."
 
 
 def test_login_normalizes_the_email(make_client):
     with make_client() as client:
-        assert login(client, "  ADMIN@Moveo.co.IL ", "12345678").status_code == 200
+        assert login(client, "  ADMIN@Example.co.IL ", "12345678").status_code == 200
 
 
 # -- auth: sign-up ------------------------------------------------------------------
 
 def test_signup_creates_an_analyst_and_logs_in(make_client):
     with make_client() as client:
-        response = client.post("/auth/signup", json={"email": " Ana@MOVEO.co.il ", "password": ANA[1]})
+        response = client.post("/auth/signup", json={"email": " Ana@EXAMPLE.co.il ", "password": ANA[1]})
         assert response.status_code == 201
-        assert (response.json()["email"], response.json()["role"]) == ("ana@moveo.co.il", "analyst")
-        assert login(client, "ana@moveo.co.il", ANA[1]).json()["role"] == "analyst"
-        assert login(client, "ana@moveo.co.il", "wrong-password").status_code == 401
+        assert (response.json()["email"], response.json()["role"]) == ("ana@example.co.il", "analyst")
+        assert login(client, "ana@example.co.il", ANA[1]).json()["role"] == "analyst"
+        assert login(client, "ana@example.co.il", "wrong-password").status_code == 401
 
 
-@pytest.mark.parametrize("email", ["ana@moveo.co.il.attacker.com", "ana@gmail.com", "ana@sub.moveo.co.il",
-                                   "ana@moveo.co.il@evil.com", "ana"])
-def test_signup_is_only_for_moveo_addresses(make_client, email):
+@pytest.mark.parametrize("email", ["ana@example.co.il.attacker.com", "ana@gmail.com", "ana@sub.example.co.il",
+                                   "ana@example.co.il@evil.com", "ana"])
+def test_signup_is_only_for_the_configured_domain(make_client, email):
     with make_client() as client:
         response = client.post("/auth/signup", json={"email": email, "password": "long-enough-1"})
         assert response.status_code == 422
@@ -116,14 +117,14 @@ def test_signup_is_only_for_moveo_addresses(make_client, email):
 
 def test_signup_cannot_create_or_take_over_an_admin(make_client):
     with make_client() as client:
-        with_role = client.post("/auth/signup", json={"email": "eve@moveo.co.il", "password": "long-enough-1",
+        with_role = client.post("/auth/signup", json={"email": "eve@example.co.il", "password": "long-enough-1",
                                                       "role": "admin"})
         assert with_role.status_code == 422  # no "role" field: sign-up always creates an analyst
-        assert login(client, "eve@moveo.co.il", "long-enough-1").status_code == 401
-        takeover = client.post("/auth/signup", json={"email": "admin@moveo.co.il", "password": "attacker-pass"})
+        assert login(client, "eve@example.co.il", "long-enough-1").status_code == 401
+        takeover = client.post("/auth/signup", json={"email": "admin@example.co.il", "password": "attacker-pass"})
         assert takeover.status_code == 409
         assert login(client, *ADMIN).json()["role"] == "admin"  # the admin's password did not change
-        eve = client.post("/auth/signup", json={"email": "eve@moveo.co.il", "password": "long-enough-1"}).json()
+        eve = client.post("/auth/signup", json={"email": "eve@example.co.il", "password": "long-enough-1"}).json()
         assert eve["role"] == "analyst"
         assert client.post("/alerts/run", headers=bearer(eve["token"])).status_code == 403
 
@@ -181,7 +182,7 @@ def test_role_comes_from_the_database_not_the_token(make_client):
         auth(client, ANA)  # Ana exists as an analyst
         forged = issue_token(User(email=ANA[0], role="admin"), SETTINGS)  # validly signed, claims admin
         assert client.post("/alerts/run", headers=bearer(forged)).status_code == 403
-        ghost = issue_token(User(email="ghost@moveo.co.il", role="admin"), SETTINGS)
+        ghost = issue_token(User(email="ghost@example.co.il", role="admin"), SETTINGS)
         assert client.get("/hubs", headers=bearer(ghost)).status_code == 401  # no such account
 
 
@@ -296,7 +297,7 @@ def test_score_change_reaches_the_users_webhook_and_feed(make_client, monkeypatc
         result = client.post("/alerts/run", headers=admin).json()
         feed = client.get("/alerts", headers=ana).json()
         admin_feed = client.get("/alerts", headers=admin).json()
-    assert [(u["user"], u["changes"], u["delivery"]) for u in result["users"]] == [("ana@moveo.co.il", 1, "sent")]
+    assert [(u["user"], u["changes"], u["delivery"]) for u in result["users"]] == [("ana@example.co.il", 1, "sent")]
     assert hook.call_count == 1
     assert [(a["hub"], a["old_score"], a["new_score"], a["delta"]) for a in feed["alerts"]] == [
         ("Miami", 35.0, 45.0, 10.0)]
@@ -358,6 +359,69 @@ def test_weak_jwt_secret_is_replaced_with_a_random_one(make_client):
         weak = issue_token(User(email=ADMIN[0], role="admin"), SETTINGS.model_copy(update={"jwt_secret": "change-me"}))
         assert client.get("/hubs", headers=bearer(weak)).status_code == 401  # can't forge with the weak secret
         assert client.get("/hubs", headers=bearer(token)).status_code == 200
+
+
+def test_generated_jwt_secret_is_persisted_across_restarts(tmp_path):
+    """Without JWT_SECRET the generated secret is saved, so a restart does not log everyone out."""
+    secret_file = tmp_path / "data" / ".jwt_secret"
+    settings = SETTINGS.model_copy(update={"jwt_secret": None, "jwt_secret_file": secret_file})
+    with TestClient(create_app(settings, analyzer=FakeAnalyzer(), db=Database("sqlite+aiosqlite:///:memory:"))) as c:
+        first = c.app.state.settings.jwt_secret
+    assert secret_file.read_text().strip() == first and len(first.encode()) >= 32
+    with TestClient(create_app(settings, analyzer=FakeAnalyzer(), db=Database("sqlite+aiosqlite:///:memory:"))) as c:
+        assert c.app.state.settings.jwt_secret == first
+
+
+def test_concurrent_starts_share_one_generated_secret(tmp_path):
+    """Several API processes on one machine must sign tokens with the same saved secret."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from weather_risk.api.auth import generated_jwt_secret
+    path = tmp_path / "data" / ".jwt_secret"
+    with ThreadPoolExecutor(8) as pool:
+        secrets_seen = set(pool.map(lambda _: generated_jwt_secret(path), range(16)))
+    assert secrets_seen == {path.read_text().strip()}
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_signup_domain_is_configurable(make_client):
+    settings = SETTINGS.model_copy(update={"signup_domain": "@My-Home.dev"})
+    with make_client(settings=settings) as client:
+        assert client.get("/health").json()["signup_domain"] == "my-home.dev"
+        assert client.post("/auth/signup", json={"email": "me@my-home.dev", "password": "long-enough-1"}).status_code == 201
+        refused = client.post("/auth/signup", json={"email": "ana@example.co.il", "password": "long-enough-1"})
+        assert refused.status_code == 422 and "@my-home.dev" in refused.json()["detail"]
+
+
+def test_chat_status_code_reflects_an_llm_outage(make_client):
+    """Bug 08: monitoring sees 503 when every provider is down; the body is still an AgentAnswer."""
+    with make_client(*[RuntimeError("503 Service Unavailable")] * 6) as client:
+        token = login(client, *ADMIN).json()["token"]
+        response = client.post("/chat", json={"message": "Rank all hubs"}, headers=bearer(token))
+    assert response.status_code == 503 and response.headers["retry-after"]
+    assert response.json()["intent"] == "error"
+
+
+def test_chat_returns_422_for_a_plan_that_fails_validation_twice(make_client):
+    with make_client("not json", "still not json") as client:
+        token = login(client, *ADMIN).json()["token"]
+        response = client.post("/chat", json={"message": "???"}, headers=bearer(token))
+    assert response.status_code == 422 and response.json()["intent"] == "error"
+
+
+def test_scoring_config_is_served_from_the_yaml(make_client):
+    """The 'How scoring works' page reads the live config, so it can't drift from config/scoring.yaml."""
+    with make_client() as client:
+        assert client.get("/scoring/config").status_code == 401
+        token = login(client, *ADMIN).json()["token"]
+        body = client.get("/scoring/config", headers=bearer(token)).json()
+    winter = body["families"]["winter"]
+    assert winter["lens_weights"] == {"observed": 0.75, "modeled": 0.25}
+    assert winter["observed"][0] == {"id": "snow_days", "label": "Days with snowfall ≥ 2.5 cm (1 in)",
+                                     "variable": "snowfall_cm", "op": "ge", "threshold": 2.5, "full_score_at": 15}
+    assert body["family_weights"] == {"winter": 1, "hurricane": 1, "flood": 1, "severe_storm": 1, "heat": 1}
+    assert body["coverage"] == {"min_pct": 99, "max_gap_days": 3}
+    assert body["robustness_scenarios"] == 2 * (5 + 2)  # each family and lens weight, up and down
 
 
 # -- behind a reverse proxy that serves the API under a path prefix (e.g. /api) -------------

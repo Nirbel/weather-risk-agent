@@ -39,7 +39,7 @@ For a condensed view of the engineering process, see:
 | Mid-build | Async SQLAlchemy instead of stdlib `sqlite3` | The agent checked it wasn't materially worse, then switched (D14) |
 | Mid-build | Narrow the scope to one day: 10 hubs, 2 sources, 5 years on demand | D21 |
 | After M8 | Keep the script as the simplest local run path; later add two-service Docker Compose for deployment | D15 |
-| Review round | Email + password auth with `@moveo.co.il` sign-up, per-user webhooks, a coverage rule, a real online eval, clean-clone startup, a two-service Compose file | D18, D22, D24, D25, D15 |
+| Review round | Email + password auth with `@example.co.il` sign-up, per-user webhooks, a coverage rule, a real online eval, clean-clone startup, a two-service Compose file | D18, D22, D24, D25, D15 |
 
 ## Things the process caught
 

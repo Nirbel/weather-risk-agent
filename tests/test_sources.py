@@ -70,22 +70,21 @@ def _page(rows):
     return {"features": [{"attributes": {"STCOFIPS": f, "NRI_VER": "December 2025", **r}} for f, r in rows]}
 
 
-def test_percentile_is_share_of_counties_strictly_lower():
-    # HRCN building loss rates: A=None (not applicable), B=0.1, C=0.2, D=0.2
-    page = _page([("A", {"HRCN_ALRB": None}), ("B", {"HRCN_ALRB": 0.1}),
-                  ("C", {"HRCN_ALRB": 0.2}), ("D", {"HRCN_ALRB": 0.2})])
-    version, n, result = nri.county_percentiles([page], ["A", "B", "C"])
-    assert (version, n) == ("December 2025", 4)
-    assert result["A"]["HRCN"] == nri.NriHazard(alrb=None, pct=0.0)
-    assert result["B"]["HRCN"].pct == 25.0  # only A (treated as 0) is lower
-    assert result["C"]["HRCN"].pct == 50.0  # A and B are lower; tie with D does not count
+def test_loss_rates_for_requested_counties():
+    # None = hazard not applicable in the county; it is kept as None (the score treats it as 0)
+    page = _page([("A", {"HRCN_ALRB": None}), ("B", {"HRCN_ALRB": 0.1}), ("C", {"HRCN_ALRB": 0.2})])
+    version, n, result = nri.county_loss_rates([page], ["A", "B", "Z"])
+    assert (version, n) == ("December 2025", 3)
+    assert result["A"]["HRCN"] is None
+    assert result["B"]["HRCN"] == 0.1
+    assert "Z" not in result  # county absent from NRI
 
 
-def test_percentiles_on_real_sample():
-    version, n, result = nri.county_percentiles([load("nri_counties_sample.json")], ["12086", "08031"])
+def test_loss_rates_on_real_sample():
+    version, n, result = nri.county_loss_rates([load("nri_counties_sample.json")], ["12086", "08031"])
     assert version == "December 2025" and n == 6
-    assert result["08031"]["HRCN"].pct == 0.0  # Denver: no hurricane exposure
-    assert result["12086"]["HRCN"].pct > result["08031"]["HRCN"].pct
+    assert not result["08031"]["HRCN"]  # Denver: no hurricane exposure
+    assert result["12086"]["HRCN"] > 1e-4  # Miami
 
 
 @respx.mock

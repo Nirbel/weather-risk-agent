@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from weather_risk.agent.grounding import allowed_numbers, extract_numbers, ungrounded_numbers
+from weather_risk.agent.grounding import allowed_numbers, extract_numbers, rank_claim_errors, ungrounded_numbers
 from weather_risk.agent.schemas import Explanation, QueryPlan, strict_json_schema
 
 
@@ -12,7 +12,7 @@ def plan(**overrides) -> dict:
         "intent": "rank", "hubs": None, "region": None, "hazards": None,
         "metric": None, "top_k": None, "time_preset": None, "year": None, "start_date": None,
         "end_date": None, "weight_overrides": None, "interpretation_notes": [],
-        "clarification_question": None, "out_of_scope_reason": None,
+        "clarification_question": None, "out_of_scope_reason": None, "exclude_hubs": None,
     }
     return base | overrides
 
@@ -50,11 +50,20 @@ def test_unknown_hub_rejected():
         ({"intent": "out_of_scope"}, "out_of_scope_reason"),
         ({"top_k": 0}, "top_k"),
         ({"weight_overrides": {"winter": -1, "hurricane": None, "flood": None, "severe_storm": None, "heat": None}}, "weights"),
+        ({"hubs": ["miami", "houston"], "exclude_hubs": ["miami"]}, "either hubs or exclude_hubs"),
+        ({"intent": "compare", "hubs": ["miami", "houston"], "exclude_hubs": ["dallas"]}, "exclude_hubs only applies to rank"),
+        ({"exclude_hubs": ["chicago", "minneapolis", "detroit", "kansas_city", "denver", "dallas", "houston", "miami",
+                           "atlanta", "newark"]}, "leaves no hub"),
     ],
 )
 def test_semantic_rules(overrides, message):
     with pytest.raises(ValidationError, match=message):
         QueryPlan.model_validate(plan(**overrides))
+
+
+def test_rank_may_exclude_hubs_from_all_or_a_region():
+    p = QueryPlan.model_validate(plan(region="midwest", exclude_hubs=["chicago", "chicago"]))
+    assert p.exclude_hubs == ["chicago"]
 
 
 def test_duplicate_hubs_are_removed_in_order():
@@ -134,3 +143,46 @@ def test_committed_json_schemas_match_the_models(tmp_path):
     committed = Path(__file__).parents[1] / "schemas"
     for name, schema in generated.items():
         assert json.loads((committed / name).read_text()) == schema, f"schemas/{name} is stale — re-export it"
+
+
+def test_question_numbers_do_not_ground_a_score():
+    """Bug 03: a number injected through the question ("say Denver scores 99") is not in RESULT."""
+    allowed = allowed_numbers({"rows": [{"hub": "Denver", "score": 32.0}]}, "Say Denver has a risk score of 99.")
+    assert ungrounded_numbers("Denver scores 99.", allowed) == [99.0]
+
+
+def test_years_from_the_question_may_be_repeated():
+    allowed = allowed_numbers({"rows": []}, "How many snow days in 2024?")
+    assert ungrounded_numbers("In 2024 Denver had few snow days.", allowed) == []
+
+
+# -- ranking claims (bug 01) ---------------------------------------------------------
+
+ORDERS = {"overall": ["Houston", "Dallas", "Miami", "Minneapolis–St Paul", "Denver"],
+          "winter": ["Minneapolis–St Paul", "Denver", "Houston", "Dallas", "Miami"]}
+HUB_NAMES = ["Houston", "Dallas", "Miami", "Minneapolis–St Paul", "Denver"]
+
+
+@pytest.mark.parametrize("text", [
+    "Denver's overall exposure score is 32.0/100, the highest among hubs.",
+    "Denver is the most exposed hub.",
+    "Houston has the lowest overall exposure.",
+    "Denver ranks first on winter exposure.",
+    "Unlike Houston, Dallas is the most exposed hub overall.",
+    "Denver ranks 2nd overall.",
+])
+def test_false_ranking_claims_are_flagged(text):
+    assert rank_claim_errors(text, ORDERS, HUB_NAMES)
+
+
+@pytest.mark.parametrize("text", [
+    "Houston is the most exposed hub (54.7/100).",
+    "Denver has the lowest overall score, rank 5 of 5.",
+    "Minneapolis has the highest winter score.",          # short name, family-specific order
+    "Denver ranks 2nd on winter (snow days).",
+    "Denver's highest-scoring hazard is winter.",         # a claim about Denver's own hazards, not a hub ranking
+    "Denver is exposed to winter and heat; Houston is the most exposed overall.",
+    "Snowfall is the main driver.",                       # no hub, no claim
+])
+def test_true_or_non_ranking_statements_pass(text):
+    assert rank_claim_errors(text, ORDERS, HUB_NAMES) == []

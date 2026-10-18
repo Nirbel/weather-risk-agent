@@ -1,7 +1,7 @@
-"""Small email + password auth for the take-home (docs/DECISIONS.md D18).
+"""Small email + password auth (docs/DECISIONS.md D18).
 
-- Sign-up is open only to addresses whose domain is exactly `moveo.co.il`, and always creates
-  an `analyst`. The only admin is the seeded demo account (settings: DEMO_ADMIN_*).
+- Sign-up is open only to addresses whose domain is exactly SIGNUP_DOMAIN (default `example.co.il`),
+  and always creates an `analyst`. The only admin is the seeded demo account (settings: DEMO_ADMIN_*).
 - Passwords are stored as salted scrypt hashes (stdlib hashlib), never as text.
 - Login returns a signed bearer token (HS256, 12 h). Every request re-reads the account, so the
   role comes from the database, not from the token, and a deleted account loses access at once.
@@ -11,11 +11,14 @@
 import base64
 import hashlib
 import hmac
+import os
 import re
 import secrets
+import time
 import unicodedata
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 import jwt
@@ -24,10 +27,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from weather_risk.db import Database
-from weather_risk.settings import Settings
+from weather_risk.settings import DEFAULT_SIGNUP_DOMAIN, Settings
 
 Role = Literal["analyst", "admin"]
-SIGNUP_DOMAIN = "moveo.co.il"
 MIN_PASSWORD, MAX_PASSWORD = 8, 128
 # RFC 5322 "dot-atom" local part, ASCII only: no quotes, spaces, or leading/trailing/double dots.
 _LOCAL_PART = re.compile(r"[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*")
@@ -48,14 +50,19 @@ def normalize_email(raw: str) -> str:
     return unicodedata.normalize("NFKC", raw).strip().lower()
 
 
-def signup_email_error(email: str) -> str | None:
+def signup_domain(settings: Settings) -> str:
+    """The configured sign-up domain, normalized like an email ("@Example.co.il" → "example.co.il")."""
+    return normalize_email(settings.signup_domain).lstrip("@")
+
+
+def signup_email_error(email: str, allowed_domain: str = DEFAULT_SIGNUP_DOMAIN) -> str | None:
     """None if a *normalized* email may sign up, else the reason. The domain is the part after the
-    last "@" and must equal moveo.co.il exactly, so user@moveo.co.il.attacker.com is refused."""
+    last "@" and must equal the allowed domain exactly, so user@example.co.il.attacker.com is refused."""
     local, at, domain = email.rpartition("@")
     if not at or not local or not domain:
         return "Enter a valid email address."
-    if domain != SIGNUP_DOMAIN:
-        return f"Sign-up is limited to @{SIGNUP_DOMAIN} email addresses."
+    if domain != allowed_domain:
+        return f"Sign-up is limited to @{allowed_domain} email addresses."
     if len(local) > 64 or not _LOCAL_PART.fullmatch(local):
         return "Enter a valid email address."
     return None
@@ -94,6 +101,31 @@ def _dummy_hash() -> str:
 
 # -- tokens and accounts -------------------------------------------------------------
 
+def generated_jwt_secret(path: Path | None) -> str:
+    """A random signing secret, kept in `path` (owner-only) so restarts don't log users out. Several
+    processes starting at once share one: only the first creates the file (O_EXCL), the rest read it."""
+    secret = secrets.token_urlsafe(32)
+    if path is None:
+        return secret
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(50):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            saved = path.read_text().strip()
+            if len(saved.encode()) >= 32:
+                return saved
+            if saved:  # a short or broken file from an earlier version: replace it
+                path.unlink(missing_ok=True)
+            else:  # another process is writing it right now
+                time.sleep(0.01)
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(secret + "\n")
+        return secret
+    raise RuntimeError(f"Could not create or read the JWT secret file {path}")
+
+
 def issue_token(user: User, settings: Settings) -> str:
     now = datetime.now(UTC)
     claims = {"sub": user.email, "role": user.role, "iat": now, "exp": now + timedelta(hours=settings.token_ttl_hours)}
@@ -108,7 +140,7 @@ def check_password_length(password: str) -> None:
 
 async def signup(db: Database, email: str, password: str, settings: Settings) -> tuple[User, str]:
     email = normalize_email(email)
-    if error := signup_email_error(email):
+    if error := signup_email_error(email, signup_domain(settings)):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, error)
     check_password_length(password)
     if not await db.create_account(email, hash_password(password), role="analyst"):  # never admin

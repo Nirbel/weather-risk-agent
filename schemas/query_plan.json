@@ -39,6 +39,32 @@
       ],
       "description": "Explicit hubs, or null to use region / all hubs"
     },
+    "exclude_hubs": {
+      "anyOf": [
+        {
+          "items": {
+            "enum": [
+              "chicago",
+              "minneapolis",
+              "detroit",
+              "kansas_city",
+              "denver",
+              "dallas",
+              "houston",
+              "miami",
+              "atlanta",
+              "newark"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "For intent=rank: hubs to leave out of all hubs or the region ('all hubs except Miami'), else null"
+    },
     "region": {
       "anyOf": [
         {
@@ -265,6 +291,7 @@
   "required": [
     "intent",
     "hubs",
+    "exclude_hubs",
     "region",
     "hazards",
     "metric",

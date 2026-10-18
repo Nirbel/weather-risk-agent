@@ -22,7 +22,7 @@
 > - Analytics charts the same deterministic results chat uses.
 > - Alert settings (later): generic webhook URL, enabled flag, score-change threshold, Test Webhook. Webhooks stay provider-agnostic.
 >
-> **Status (2026-10-02):** M1–M8 done, plus a review round requested by the user: email + password auth with `@moveo.co.il` sign-up (D18), per-user webhooks (D22), the coverage rule (D24), an online end-to-end eval (D25), clean-clone startup and a two-service Compose file (D15). The app runs with `uv run python scripts/run.py`. Design: [ARCHITECTURE.md](ARCHITECTURE.md).
+> **Status (2026-10-02):** M1–M8 done, plus a review round requested by the user: email + password auth with `@example.co.il` sign-up (D18), per-user webhooks (D22), the coverage rule (D24), an online end-to-end eval (D25), clean-clone startup and a two-service Compose file (D15). The app runs with `uv run python scripts/run.py`. Design: [ARCHITECTURE.md](ARCHITECTURE.md).
 >
 > **Milestones now:**
 > - M1–M3 rescoped and done.
@@ -249,7 +249,7 @@ No ORM, no LangChain/LangGraph, no plugin registry: one module per data source.
 | Lens | Source | What it measures |
 |---|---|---|
 | **Observed** | Open-Meteo, 2016–2025 | Average days per year above an operational threshold |
-| **Modeled loss** | FEMA NRI (Dec 2025) | National percentile of the county's building loss rate for that hazard |
+| **Modeled loss** | FEMA NRI (Dec 2025) | The county's building loss rate for that hazard, on log-scale fixed anchors (D26; originally a national percentile) |
 | **History** | OpenFEMA | Major-disaster (DR) declarations for the hub's county since 2000 |
 
 **Indicators per family:**

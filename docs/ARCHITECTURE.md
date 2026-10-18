@@ -92,8 +92,9 @@ Interactive docs at `http://localhost:8000/docs`.
 | Route | Who | Purpose |
 |---|---|---|
 | `POST /auth/login` | anyone | Email + password → signed bearer token with role |
-| `POST /auth/signup` | `@moveo.co.il` only | Create an analyst account and log in |
-| `POST /chat` | signed-in user | One agent turn; returns `AgentAnswer` |
+| `POST /auth/signup` | `SIGNUP_DOMAIN` addresses only | Create an analyst account and log in |
+| `POST /chat` | signed-in user | One agent turn; returns `AgentAnswer` (503 if every LLM is down, 422 if the plan stays invalid; the body is still an `AgentAnswer`) |
+| `GET /scoring/config` | signed-in user | Thresholds, anchors and weights from `config/scoring.yaml` (the *How scoring works* page) |
 | `GET /conversations`, `GET /conversations/{id}` | owner only | Conversation history |
 | `POST /transcribe` | signed-in user | Voice: audio → text (the UI then calls `/chat`) |
 | `GET /analytics/exposure`, `/analytics/yearly`, `/analytics/hubs/{id}` | signed-in user | The same numbers chat cites, without an LLM |
@@ -114,7 +115,7 @@ Interactive docs at `http://localhost:8000/docs`.
   to their webhook.
 - **Safety:** http(s) only, 10 s timeout, no redirects. The destination is resolved and checked at save and
   at send: link-local / metadata addresses are always refused, private and loopback ones unless
-  `ALLOW_PRIVATE_WEBHOOKS=true` (anyone with a `@moveo.co.il` address can sign up and choose a URL).
+  `ALLOW_PRIVATE_WEBHOOKS=true` (anyone with a `@example.co.il` address can sign up and choose a URL).
 - **Data gaps:** a hub with a gap is skipped, so a failed fetch never looks like a score change.
 - **Why alerts are rare:** exposure covers the previous 5 completed years. Scores move only when the window
   rolls over in January, FEMA publishes a new NRI release, the scoring config changes, or a data gap closes.
@@ -180,7 +181,7 @@ reads run while the API writes. The app runs one API process, which also hosts t
 |---|---|
 | `weather_daily` | One row per hub per day: snowfall, precipitation, Tmax, Tmin, max gust |
 | `weather_fetches` | Which (hub, year) was fetched, when, whether complete, and the ERA5 grid cell |
-| `http_cache` | Payloads read whole: NRI percentiles for the hub counties, with fetch time and version |
+| `http_cache` | Payloads read whole: NRI building-loss rates for the hub counties, with fetch time and version |
 | `source_status` | Last success and last error per source (feeds answers' data notes and `/health`) |
 | `users` | Email, role, salted scrypt password hash (never the password) |
 | `conversations`, `turns` | Per-user conversations; each turn stores the question, resolved plan and answer |

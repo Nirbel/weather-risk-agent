@@ -201,6 +201,20 @@
       "additionalProperties": true,
       "title": "Meta",
       "type": "object"
+    },
+    "language": {
+      "default": "en",
+      "description": "Language of the reader-facing text: en or he",
+      "title": "Language",
+      "type": "string"
+    },
+    "column_labels": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Display header per table key when language is not en",
+      "title": "Column Labels",
+      "type": "object"
     }
   },
   "required": [

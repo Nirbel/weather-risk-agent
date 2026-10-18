@@ -120,6 +120,17 @@ def run_checks(checks: dict, answer: dict) -> list[str]:
             case "order" if not (want[0] in table_hubs and want[1] in table_hubs
                                  and table_hubs.index(want[0]) < table_hubs.index(want[1])):
                 failures.append(f"order: expected {want[0]} above {want[1]}")
+            case "score_below":
+                scores = {row.get("hub"): row.get("score") for row in answer["table"]}
+                for hub, limit in want.items():
+                    if scores.get(hub) is None or scores[hub] >= limit:
+                        failures.append(f"score_below: {hub} scores {scores.get(hub)}, expected < {limit}")
+            case "score_gap":
+                above, below, margin = want
+                scores = {row.get("hub"): row.get("score") for row in answer["table"]}
+                if scores.get(above) is None or scores.get(below) is None or scores[above] - scores[below] <= margin:
+                    failures.append(f"score_gap: {above} ({scores.get(above)}) not more than {margin} points "
+                                    f"above {below} ({scores.get(below)})")
             case "headline_contains":
                 failures += [f"headline_contains: {s!r} not in answer" for s in want if s not in text]
             case "uncertainty_mentions" if not any(want in r for r in answer["uncertainty"]["reasons"]):

@@ -99,7 +99,7 @@ def synthetic_breakdown(hub_id: str, gaps: list[str] | None = None, incomplete: 
             "lenses": {"modeled": {"score": None if f in no_evidence else s, "weight": 0.5,
                                    "source": "FEMA National Risk Index",
                                    "indicators": [] if f in no_evidence else [
-                                       {"id": f"nri_{f}", "label": f"{f} indicator", "raw": s, "unit": "percentile",
+                                       {"id": f"nri_{f}", "label": f"{f} indicator", "raw": s / 1e6, "unit": "loss rate",
                                         "score": s}]}},
             "missing_lenses": ["observed"] if f in blocked else ["modeled"] if f in no_evidence else [],
             "missing_weight_share": 0.0}

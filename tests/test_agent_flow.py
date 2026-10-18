@@ -22,7 +22,7 @@ def plan_json(**overrides) -> str:
     base = {
         "intent": "rank", "hubs": None, "region": None, "hazards": None, "metric": None, "top_k": None,
         "time_preset": None, "year": None, "start_date": None, "end_date": None, "weight_overrides": None,
-        "interpretation_notes": [], "clarification_question": None, "out_of_scope_reason": None,
+        "interpretation_notes": [], "clarification_question": None, "out_of_scope_reason": None, "exclude_hubs": None,
     }
     return json.dumps(base | overrides)
 
@@ -76,6 +76,34 @@ async def test_invented_number_is_retried_then_falls_back_to_template(bundle):
 async def test_llm_down_falls_back_to_template(bundle):
     _, _, source = await explain("q", bundle, SETTINGS, completion=FakeCompletion(RuntimeError("down"), RuntimeError("down")))
     assert source == "template"
+
+
+async def test_false_premise_is_retried_then_falls_back_to_template():
+    """Bug 01: "Why is Denver the most exposed hub?" must not be answered by repeating the premise."""
+    b = await execute(QueryPlan.model_validate_json(plan_json(intent="explain", hubs=["minneapolis"])),
+                      ExecContext(FakeAnalyzer()))
+    assert b.orders["overall"][0] == "Houston" and b.orders["winter"][0] == "Minneapolis–St Paul"
+    wrong = explanation_json("Minneapolis–St Paul is the most exposed hub overall.")
+    fake = FakeCompletion(wrong, wrong)
+    explanation, meta, source = await explain("Why is Minneapolis the most exposed hub?", b, SETTINGS, completion=fake)
+    assert source == "template" and "rank 4 of 10" in explanation.summary
+    assert "Houston" in fake.calls[1]["messages"][-1]["content"]  # the retry says who is actually first
+
+
+async def test_forecast_follow_ups_are_dropped(bundle):
+    """Bug 02: the agent must not suggest questions it would refuse (forecasts, outlooks)."""
+    fake = FakeCompletion(json.dumps({"summary": "Minneapolis–St Paul ranks first with 90.", "reasoning": ["Winter."],
+                                      "suggested_follow_ups": ["What is the 7-day outlook for Detroit?",
+                                                               "Compare Detroit and Chicago on winter",
+                                                               "Will it snow in Chicago next week?"]}))
+    explanation, _, _ = await explain("Midwest winter?", bundle, SETTINGS, completion=fake)
+    assert explanation.suggested_follow_ups == ["Compare Detroit and Chicago on winter"]
+
+
+def test_explainer_prompt_matches_what_the_agent_can_answer():
+    from weather_risk.agent.explainer import PROMPT
+    assert "outlook" not in PROMPT and "NWS alerts" not in PROMPT
+    assert "language of the QUESTION" in PROMPT
 
 
 def test_template_explanation_uses_bundle_points(bundle):
@@ -137,7 +165,16 @@ async def test_conversation_belongs_to_its_owner(db):
 async def test_planner_failure_gives_clear_error_answer(db):
     answer = await Agent(db, FakeAnalyzer(), SETTINGS, completion=FakeCompletion("not json", "still not json")).ask("???")
     assert answer.intent == "error" and answer.uncertainty.level == "high"
-    assert "couldn't" in answer.answer.lower()
+    assert "couldn't" in answer.answer.lower() and "rephrase" in answer.answer
+    assert answer.meta["error_kind"] == "invalid_plan"
+
+
+async def test_llm_outage_does_not_ask_to_rephrase(db):
+    """Bug 07: when no provider answers, rephrasing will not help — say the model is unavailable."""
+    down = [RuntimeError("503 Service Unavailable")] * 6
+    answer = await Agent(db, FakeAnalyzer(), SETTINGS, completion=FakeCompletion(*down)).ask("Rank all hubs")
+    assert answer.intent == "error" and "unavailable" in answer.answer and "rephrase" not in answer.answer
+    assert answer.meta["error_kind"] == "llm_unavailable"
 
 
 async def test_offline_answer_from_plan_uses_no_llm(db):

@@ -53,7 +53,7 @@ class Analyzer:
     async def exposure(self, hub_ids: list[str] | None = None) -> Exposure:
         """Exposure breakdowns for the given hubs (default: all), fetching missing data on demand."""
         start, end = self.window()
-        nri, nri_gaps = await self.hazards.percentiles()
+        nri, nri_gaps = await self.hazards.loss_rates()
 
         async def one(hub: Hub) -> tuple[str, dict]:
             rows, weather_gaps = await self.weather.daily(hub, start, end)
@@ -109,7 +109,8 @@ class Analyzer:
         return out
 
 
-def build_analyzer(db, client, *, today_fn: Callable[[], date] = date.today, limiter=None) -> Analyzer:
+def build_analyzer(db, client, *, today_fn: Callable[[], date] = date.today, limiter=None,
+                   calls_per_minute: float | None = None) -> Analyzer:
     """Wire the on-demand services (shared by the API, the CLIs and eval).
 
     `limiter=None` → the real Open-Meteo rate limit; replay (no network) passes an unlimited one.
@@ -118,5 +119,6 @@ def build_analyzer(db, client, *, today_fn: Callable[[], date] = date.today, lim
     from weather_risk.data import OPEN_METEO_CALLS_PER_MIN, RateLimiter
 
     hubs = load_hubs()
-    weather = WeatherService(db, client, limiter or RateLimiter(OPEN_METEO_CALLS_PER_MIN), today_fn=today_fn)
+    limiter = limiter or RateLimiter(calls_per_minute or OPEN_METEO_CALLS_PER_MIN)
+    weather = WeatherService(db, client, limiter, today_fn=today_fn)
     return Analyzer(weather, HazardService(db, client, hubs), load_scoring_config(), hubs, today_fn=today_fn)
