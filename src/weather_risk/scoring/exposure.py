@@ -12,8 +12,8 @@ Every intermediate value is kept in the returned breakdown so "why" answers can 
 from dataclasses import dataclass
 from statistics import mean
 
-from weather_risk.config import Family, ScoringConfig
-from weather_risk.scoring.indicators import anchor_score, days_per_year
+from weather_risk.config import Family, NriAnchor, ScoringConfig
+from weather_risk.scoring.indicators import anchor_score, days_per_year, log_anchor_score
 from weather_risk.sources.open_meteo import DailyRow
 
 LENS_SOURCES = {
@@ -25,7 +25,7 @@ LENS_SOURCES = {
 @dataclass
 class HubInputs:
     daily: list[DailyRow]  # empty = no weather data available
-    nri: dict[str, dict] | None  # hazard code → {"alrb", "pct"}; None = source unavailable
+    nri: dict[str, dict] | None  # hazard code → {"alrb"}; None = source unavailable
     weather_complete: bool = True  # False = the record fails the coverage rule (analysis.py decides)
 
 
@@ -44,13 +44,15 @@ def _observed_lens(family: Family, daily: list[DailyRow], complete: bool) -> dic
     return {"score": mean(i["score"] for i in indicators), "indicators": indicators, "source": LENS_SOURCES["observed"]}
 
 
-def _modeled_lens(family: Family, nri: dict[str, dict] | None, names: dict[str, str]) -> dict | None:
+def _modeled_lens(family: Family, nri: dict[str, dict] | None, names: dict[str, str],
+                  anchors: dict[str, NriAnchor]) -> dict | None:
     if family.modeled is None:
         return None
     indicators = [
-        {"id": f"nri_{code}", "label": f"{names[code]}: building loss rate, national percentile",
-         "raw": nri[code]["pct"], "unit": "percentile", "applicable": nri[code]["alrb"] is not None,
-         "score": nri[code]["pct"]}
+        {"id": f"nri_{code}", "label": f"{names[code]} building loss",
+         "raw": nri[code]["alrb"], "unit": "loss rate", "applicable": nri[code]["alrb"] is not None,
+         "floor": anchors[code].floor, "full": anchors[code].full,
+         "score": log_anchor_score(nri[code]["alrb"], anchors[code].floor, anchors[code].full)}
         for code in family.modeled.nri
         if nri and code in nri
     ]
@@ -76,7 +78,7 @@ def score_family(name: str, inputs: HubInputs, cfg: ScoringConfig) -> dict:
     weights = cfg.lens_weights_for(name)
     built = {
         "observed": _observed_lens(family, inputs.daily, inputs.weather_complete),
-        "modeled": _modeled_lens(family, inputs.nri, cfg.nri_hazard_names),
+        "modeled": _modeled_lens(family, inputs.nri, cfg.nri_hazard_names, cfg.nri_anchors),
     }
     lenses = {lens: data | {"weight": getattr(weights, lens)} for lens, data in built.items() if data is not None}
     missing = [lens for lens, data in lenses.items() if data["score"] is None]

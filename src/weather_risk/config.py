@@ -88,6 +88,18 @@ class ModeledLens(_Strict):
     combine: Literal["mean", "max"]
 
 
+class NriAnchor(_Strict):
+    """Building loss rates that score 0 (`floor`) and 100 (`full`) on a log scale (D26)."""
+    floor: float = Field(gt=0)
+    full: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "NriAnchor":
+        if self.full <= self.floor:
+            raise ValueError("full must be above floor")
+        return self
+
+
 class Family(_Strict):
     label: str
     lens_weights: LensWeights | None = None
@@ -138,6 +150,7 @@ class ScoringConfig(_Strict):
     lens_weights: LensWeights
     families: dict[str, Family]
     nri_hazard_names: dict[NriCode, str]
+    nri_anchors: dict[NriCode, NriAnchor]
     robustness: Robustness
     stats: dict[str, StatMetric]
 
@@ -151,6 +164,8 @@ class ScoringConfig(_Strict):
         used = {code for fam in self.families.values() if fam.modeled for code in fam.modeled.nri}
         if missing := used - set(self.nri_hazard_names):
             raise ValueError(f"nri_hazard_names lacks {', '.join(sorted(missing))}")
+        if missing := used - set(self.nri_anchors):
+            raise ValueError(f"nri_anchors lacks {', '.join(sorted(missing))}")
         return self
 
     def lens_weights_for(self, family: str) -> LensWeights:

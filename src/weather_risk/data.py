@@ -1,7 +1,7 @@
 """On-demand data: Open-Meteo history and FEMA NRI, fetched when a question needs them and cached.
 
 Nothing is preloaded. A completed calendar year of weather is fetched once and never again;
-the current year is refreshed when older than 12 hours; NRI percentiles are cached 30 days.
+the current year is refreshed when older than 12 hours; NRI loss rates are cached 30 days.
 Failures become data gaps that answers report (docs/DECISIONS.md D6, D14).
 """
 
@@ -105,7 +105,7 @@ class WeatherService:
 
 
 class HazardService:
-    """FEMA NRI building-loss percentiles for the hub counties (computed over all US counties)."""
+    """FEMA NRI building-loss rates for the hub counties."""
 
     TTL = timedelta(days=30)
 
@@ -114,7 +114,7 @@ class HazardService:
         self.db, self.client, self.hubs, self.now_fn = db, client, list(hubs), now_fn
         self._lock = asyncio.Lock()
 
-    async def percentiles(self) -> tuple[dict | None, list[str]]:
+    async def loss_rates(self) -> tuple[dict | None, list[str]]:
         """Returns ({"version", "n_counties", "by_fips"}, gaps)."""
         async with self._lock:
             cached = await self.db.cache_get("nri")
@@ -125,7 +125,7 @@ class HazardService:
                     return cached[1], []
             try:
                 pages = await nri.fetch_county_pages(self.client)
-                version, n, by_fips = nri.county_percentiles(pages, sorted(needed))
+                version, n, by_fips = nri.county_loss_rates(pages, sorted(needed))
             except (SourceError, ValueError, KeyError) as exc:
                 await self.db.source_error("fema_nri", str(exc))
                 if cached:
@@ -136,7 +136,7 @@ class HazardService:
                 "version": version,
                 "n_counties": n,
                 "requested_fips": sorted(needed),  # a county absent from NRI must not trigger refetches
-                "by_fips": {f: {hz: {"alrb": v.alrb, "pct": v.pct} for hz, v in m.items()} for f, m in by_fips.items()},
+                "by_fips": {f: {hz: {"alrb": v} for hz, v in m.items()} for f, m in by_fips.items()},
             }
             await self.db.cache_put("nri", "fema_nri", payload, fetched_at=self.now_fn())
             await self.db.source_ok("fema_nri")

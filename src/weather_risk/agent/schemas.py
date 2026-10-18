@@ -41,6 +41,8 @@ class QueryPlan(BaseModel):
     intent: Intent = Field(description="rank hubs, compare hubs, stat (% of past days), explain one hub's score, "
                                        "clarify, or out_of_scope")
     hubs: list[HubId] | None = Field(description="Explicit hubs, or null to use region / all hubs")
+    exclude_hubs: list[HubId] | None = Field(description="For intent=rank: hubs to leave out of all hubs or the "
+                                                         "region ('all hubs except Miami'), else null")
     region: Region | None = Field(description="US Census region filter, or null")
     hazards: list[Family] | None = Field(description="Hazard families to focus on, or null for all")
     metric: StatMetric | None = Field(description="For intent=stat: which day count")
@@ -59,6 +61,14 @@ class QueryPlan(BaseModel):
         errors: list[str] = []
         if self.hubs:
             self.hubs = list(dict.fromkeys(self.hubs))
+        if self.exclude_hubs:
+            self.exclude_hubs = list(dict.fromkeys(self.exclude_hubs))
+            if self.hubs:
+                errors.append("set either hubs or exclude_hubs, not both (list only the hubs you want)")
+            if self.intent != "rank":
+                errors.append("exclude_hubs only applies to rank")
+            if set(HUB_IDS) <= set(self.exclude_hubs):
+                errors.append("exclude_hubs leaves no hub to rank")
         n_hubs = len(self.hubs or [])
         if self.hubs and self.region:
             errors.append("set either hubs or region, not both")
@@ -142,6 +152,9 @@ class AgentAnswer(BaseModel):
     time_windows: list[TimeWindow]
     query_plan: dict[str, Any] | None
     meta: dict[str, Any]
+    language: str = Field(default="en", description="Language of the reader-facing text: en or he")
+    column_labels: dict[str, str] = Field(default_factory=dict,
+                                          description="Display header per table key when language is not en")
 
 
 # -- strict schema for the LLM ---------------------------------------------------

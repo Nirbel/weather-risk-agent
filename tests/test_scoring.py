@@ -6,7 +6,7 @@ import pytest
 
 from weather_risk.config import ScoringConfig
 from weather_risk.scoring import exposure, robustness
-from weather_risk.scoring.indicators import days_per_year, exceeds, piecewise
+from weather_risk.scoring.indicators import days_per_year, exceeds, log_anchor_score, piecewise
 from weather_risk.sources.open_meteo import DailyRow
 
 
@@ -24,6 +24,22 @@ def test_piecewise_interpolates_and_is_flat_outside():
     assert piecewise(15, pts) == 80
     assert piecewise(45, pts) == 100  # flat above the last point
     assert piecewise(-3, pts) == 0  # flat below the first point
+
+
+def test_log_anchor_score_hand_computed():
+    # floor 1e-6 → 0, full 1e-3 → 100: three decades, so each decade is 33.3 points.
+    # 3.16e-5 ≈ 10^-4.5 is halfway in log terms → 50.
+    assert log_anchor_score(1e-6, 1e-6, 1e-3) == 0
+    assert log_anchor_score(1e-3, 1e-6, 1e-3) == 100
+    assert log_anchor_score(3.16e-5, 1e-6, 1e-3) == pytest.approx(50, abs=0.1)
+    assert log_anchor_score(1e-5, 1e-6, 1e-3) == pytest.approx(100 / 3)
+
+
+def test_log_anchor_score_clamps_and_treats_no_loss_as_zero():
+    assert log_anchor_score(1e-9, 1e-6, 1e-3) == 0  # below the floor
+    assert log_anchor_score(0.5, 1e-6, 1e-3) == 100  # above full
+    assert log_anchor_score(0.0, 1e-6, 1e-3) == 0  # no loss (log undefined)
+    assert log_anchor_score(None, 1e-6, 1e-3) == 0  # hazard not applicable in the county
 
 
 def test_piecewise_handles_decreasing_scores():
@@ -57,6 +73,8 @@ CFG = ScoringConfig.model_validate({
     "family_weights": {"winter": 1, "hurricane": 1},
     "lens_weights": {"observed": 0.5, "modeled": 0.5},
     "nri_hazard_names": {"WNTW": "Winter weather", "HRCN": "Hurricane"},
+    # five decades → 20 points per decade
+    "nri_anchors": {"WNTW": {"floor": 1e-6, "full": 1e-1}, "HRCN": {"floor": 1e-6, "full": 1e-1}},
     "robustness": {"perturbation": 0.25, "tie_margin": 3.0},
     "stats": {},
     "families": {
@@ -70,7 +88,7 @@ CFG = ScoringConfig.model_validate({
         "hurricane": {"label": "Hurricane", "observed": [], "modeled": {"nri": ["HRCN"], "combine": "mean"}},
     },
 })
-NRI = {"WNTW": {"pct": 30.0, "alrb": 0.001}, "HRCN": {"pct": 60.0, "alrb": 0.01}}
+NRI = {"WNTW": {"alrb": 1e-4}, "HRCN": {"alrb": 1e-3}}  # WNTW: 2 decades above floor → 40; HRCN: 3 → 60
 
 
 def four_years_with_snow_days(n: int) -> list[DailyRow]:
@@ -85,25 +103,25 @@ def with_lens_weights(cfg: ScoringConfig, family: str, observed: float, modeled:
 
 
 def test_family_score_weights_two_lenses():
-    # observed: 10 snow days in 4 years → 2.5/yr → 50; modeled WNTW pct 30 → 0.5·50 + 0.5·30 = 40
+    # observed: 10 snow days in 4 years → 2.5/yr → 50; modeled WNTW 1e-4 → 40 → 0.5·50 + 0.5·40 = 45
     result = exposure.compute_exposure("x", exposure.HubInputs(four_years_with_snow_days(10), NRI), CFG)
     winter = result["families"]["winter"]
     assert winter["lenses"]["observed"]["score"] == pytest.approx(50)
-    assert winter["lenses"]["modeled"]["score"] == 30
-    assert winter["score"] == pytest.approx(40)
+    assert winter["lenses"]["modeled"]["score"] == pytest.approx(40)
+    assert winter["score"] == pytest.approx(45)
 
 
 def test_family_lens_weights_can_be_overridden_per_family():
-    # winter 0.75 / 0.25: 0.75·50 + 0.25·30 = 45
+    # winter 0.75 / 0.25: 0.75·50 + 0.25·40 = 47.5
     cfg = with_lens_weights(CFG, "winter", 0.75, 0.25)
     winter = exposure.compute_exposure("x", exposure.HubInputs(four_years_with_snow_days(10), NRI), cfg)["families"]["winter"]
-    assert winter["score"] == pytest.approx(45)
+    assert winter["score"] == pytest.approx(47.5)
     assert winter["lenses"]["observed"]["weight"] == 0.75
 
 
 def test_family_without_observed_lens_uses_modeled_only():
     hurricane = exposure.compute_exposure("x", exposure.HubInputs(four_years_with_snow_days(0), NRI), CFG)["families"]["hurricane"]
-    assert hurricane["score"] == 60
+    assert hurricane["score"] == pytest.approx(60)
     assert hurricane["missing_lenses"] == []  # absent by design is not a data gap
 
 
@@ -136,7 +154,7 @@ def test_incomplete_weather_blocks_weather_families_and_overall():
     winter, hurricane = result["families"]["winter"], result["families"]["hurricane"]
     assert winter["score"] is None and winter["incomplete"] is True
     assert winter["lenses"]["observed"]["score"] is None
-    assert hurricane["score"] == 60 and not hurricane.get("incomplete")
+    assert hurricane["score"] == pytest.approx(60) and not hurricane.get("incomplete")
     assert result["score"] is None
     assert winter["contribution"] is None and hurricane["contribution"] is None
     assert not any("remaining evidence" in gap for gap in result["data_gaps"])
@@ -152,10 +170,10 @@ def test_overall_score_needs_every_requested_family_complete():
 
 
 def test_overall_is_equal_weight_mean_and_names_top_family():
-    # winter 40, hurricane 60 → overall 50; contribution of winter = 40 × 1/2 = 20; top family hurricane
+    # winter 45, hurricane 60 → overall 52.5; contribution of winter = 45 × 1/2 = 22.5; top family hurricane
     result = exposure.compute_exposure("x", exposure.HubInputs(four_years_with_snow_days(10), NRI), CFG)
-    assert result["score"] == pytest.approx(50)
-    assert result["families"]["winter"]["contribution"] == pytest.approx(20)
+    assert result["score"] == pytest.approx(52.5)
+    assert result["families"]["winter"]["contribution"] == pytest.approx(22.5)
     assert result["top_family"] == "hurricane"
 
 
@@ -168,10 +186,24 @@ def test_rescore_with_weight_override():
 def test_modeled_combine_max():
     cfg = ScoringConfig.model_validate(CFG.model_dump() | {
         "family_weights": {"flood": 1}, "nri_hazard_names": {"IFLD": "Inland", "CFLD": "Coastal"},
+        "nri_anchors": {"IFLD": {"floor": 1e-6, "full": 1e-1}, "CFLD": {"floor": 1e-6, "full": 1e-1}},
         "families": {"flood": {"label": "Flood", "observed": [], "modeled": {"nri": ["IFLD", "CFLD"], "combine": "max"}}},
     })
-    nri = {"IFLD": {"pct": 40, "alrb": 1}, "CFLD": {"pct": 70, "alrb": 1}}
-    assert exposure.compute_exposure("x", exposure.HubInputs([], nri), cfg)["families"]["flood"]["score"] == 70
+    nri = {"IFLD": {"alrb": 1e-4}, "CFLD": {"alrb": 1e-2}}  # 40 and 80 → max 80
+    assert exposure.compute_exposure("x", exposure.HubInputs([], nri), cfg)["families"]["flood"]["score"] == pytest.approx(80)
+
+
+def test_modeled_indicator_reports_the_loss_rate_and_its_anchors():
+    hurricane = exposure.compute_exposure("x", exposure.HubInputs(four_years_with_snow_days(0), NRI), CFG)["families"]["hurricane"]
+    ind = hurricane["lenses"]["modeled"]["indicators"][0]
+    assert (ind["raw"], ind["unit"], ind["floor"], ind["full"]) == (1e-3, "loss rate", 1e-6, 1e-1)
+    assert ind["applicable"] is True and ind["score"] == pytest.approx(60)
+
+
+def test_not_applicable_hazard_scores_zero():
+    nri = {"WNTW": {"alrb": 1e-4}, "HRCN": {"alrb": None}}
+    hurricane = exposure.compute_exposure("x", exposure.HubInputs([], nri), CFG)["families"]["hurricane"]
+    assert hurricane["score"] == 0 and hurricane["lenses"]["modeled"]["indicators"][0]["applicable"] is False
 
 
 # -- ranking robustness -------------------------------------------------------

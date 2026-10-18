@@ -1,6 +1,7 @@
 """Async SQLAlchemy store (SQLite via aiosqlite) — repository behaviour."""
 
-from datetime import date
+import asyncio
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -82,3 +83,23 @@ async def test_missing_database_directory_is_created(tmp_path):
     assert [r.date for r in await database.daily("denver", date(2025, 1, 1), date(2025, 1, 31))] == [date(2025, 1, 1)]
     await database.dispose()
     assert path.is_file()
+
+
+async def test_lease_is_held_by_one_holder_until_it_expires(db):
+    t0 = datetime(2026, 10, 18, 12, tzinfo=UTC)
+    assert await db.try_lease("alert_check", "a", ttl_s=60, now=t0)
+    assert not await db.try_lease("alert_check", "b", ttl_s=60, now=t0 + timedelta(seconds=30))
+    assert await db.try_lease("alert_check", "a", ttl_s=60, now=t0 + timedelta(seconds=30))  # the holder renews
+    assert await db.try_lease("alert_check", "b", ttl_s=60, now=t0 + timedelta(seconds=91))  # expired → taken over
+
+
+async def test_two_processes_can_write_to_one_sqlite_file(tmp_path):
+    """busy_timeout: a second process waits for the write lock instead of failing with "database is locked"."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+    a, b = Database(url), Database(url)
+    await a.create_all()
+    await asyncio.gather(*(db.upsert_daily(f"hub{i}", [row(d) for d in range(1, 29)])
+                           for i, db in enumerate([a, b] * 10)))
+    assert len(await a.daily("hub19", date(2025, 1, 1), date(2025, 1, 31))) == 28
+    await a.dispose()
+    await b.dispose()

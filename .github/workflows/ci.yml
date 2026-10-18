@@ -1,0 +1,24 @@
+# Tests and the offline eval need no keys and no network (recorded real responses), so they run on every push.
+# --live / --online evals use API keys and live data: run them by hand.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+      - name: Offline eval (fails below a 100 % pass rate)
+        run: uv run python -m eval.run
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: eval/reports/*.json
+          if-no-files-found: ignore

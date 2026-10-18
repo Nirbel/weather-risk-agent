@@ -33,21 +33,24 @@ def rank_stability(
 ) -> dict:
     """Re-rank with each family weight and each lens weight moved ±perturbation, one at a time."""
     baseline = ranked(_scores(breakdowns, families, family_weights, {}))
-    scenarios: list[tuple[str, dict, dict]] = []
+    scenarios: list[tuple[dict, dict, dict]] = []  # (what moved, family weights, lens factors)
     for factor, sign in ((1 + perturbation, "+"), (1 - perturbation, "−")):
         for f in families:
-            scenarios.append((f"{f} weight {sign}{perturbation:.0%}", family_weights | {f: family_weights.get(f, 0.0) * factor}, {}))
+            scenarios.append(({"scenario": f"{f} weight {sign}{perturbation:.0%}", "kind": "family", "name": f,
+                               "change": f"{sign}{perturbation:.0%}"},
+                              family_weights | {f: family_weights.get(f, 0.0) * factor}, {}))
         for lens in lenses:
-            scenarios.append((f"{lens} evidence weight {sign}{perturbation:.0%}", family_weights, {lens: factor}))
+            scenarios.append(({"scenario": f"{lens} evidence weight {sign}{perturbation:.0%}", "kind": "lens",
+                               "name": lens, "change": f"{sign}{perturbation:.0%}"}, family_weights, {lens: factor}))
 
     top1_same = topk_same = 0
     flips = []
-    for description, fw, lw in scenarios:
+    for moved, fw, lw in scenarios:
         order = ranked(_scores(breakdowns, families, fw, lw))
         if order[:1] == baseline[:1]:
             top1_same += 1
         elif len(flips) < 3:
-            flips.append({"scenario": description, "first": order[0]})
+            flips.append(moved | {"first": order[0]})
         if set(order[:top_k]) == set(baseline[:top_k]):
             topk_same += 1
     return {

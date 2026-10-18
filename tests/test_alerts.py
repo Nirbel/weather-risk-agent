@@ -1,5 +1,6 @@
 """Score-change alerts: the pure diff (hand-computed), the alert run and webhook delivery (respx)."""
 
+import asyncio
 import ipaddress
 import json
 from datetime import date
@@ -8,8 +9,9 @@ import httpx
 import pytest
 import respx
 
-from weather_risk.alerts import AlertService, ScoreChange, diff_scores
+from weather_risk.alerts import AlertService, ScoreChange, diff_scores, run_on_schedule
 from weather_risk.analysis import Exposure
+from weather_risk.db import Database
 from weather_risk.settings import Settings
 
 HOOK = "https://hooks.example.com/weather"
@@ -51,7 +53,7 @@ def test_changes_are_ordered_by_size():
 
 # -- AlertService: per-user webhooks (in-memory DB, fake exposure, webhooks mocked) -------
 
-ANA, BEN = "ana@moveo.co.il", "ben@moveo.co.il"
+ANA, BEN = "ana@example.co.il", "ben@example.co.il"
 HOOK_BEN = "https://hooks.example.com/ben"
 
 
@@ -271,3 +273,41 @@ async def test_delivery_rechecks_the_destination(db):
             result = await service(db, client=client, resolve=rebound).send_test(ANA)
     assert result["delivery"].startswith("blocked: 127.0.0.1") and not hook.called
 
+
+
+async def test_scheduled_check_logs_its_result_without_errors(caplog):
+    """The scheduler used to read result["status"], which run() never returns, and logged every check as failed."""
+    calls = []
+
+    class Service:
+        async def run_scheduled(self, holder, every_s):
+            calls.append(holder)
+            return {"checked_at": "2026-10-18T00:00:00+00:00", "window": {}, "skipped": {}, "users": []}
+
+    task = asyncio.create_task(run_on_schedule(Service(), every_hours=1, first_delay_s=0))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    assert len(calls) == 1 and "failed" not in caplog.text
+
+
+async def test_only_one_api_process_runs_each_scheduled_check(tmp_path):
+    """Bug 10: two API processes share the database; each scheduled check must run once, not once per process."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+    first, second = Database(url), Database(url)  # two processes' connections to one file
+    await first.create_all()
+    runs = []
+
+    def service(db):
+        alerts = AlertService(db, None, Settings(scheduler_enabled=False), None)
+
+        async def run():
+            runs.append(db)
+            return {"users": []}
+        alerts.run = run
+        return alerts
+
+    results = await asyncio.gather(service(first).run_scheduled("process-a", 3600),
+                                   service(second).run_scheduled("process-b", 3600))
+    assert len(runs) == 1 and results.count(None) == 1
+    await first.dispose()
+    await second.dispose()

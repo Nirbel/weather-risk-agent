@@ -130,11 +130,11 @@ async def test_nri_is_fetched_once_and_cached(db):
     route = respx.get(nri.URL).mock(return_value=httpx.Response(200, json=load("nri_counties_sample.json")))
     async with httpx.AsyncClient() as client:
         hazards = HazardService(db, client, load_hubs())
-        payload, gaps = await hazards.percentiles()
-        await hazards.percentiles()
+        payload, gaps = await hazards.loss_rates()
+        await hazards.loss_rates()
     assert route.call_count == 1
     assert payload["version"] == "December 2025"
-    assert payload["by_fips"]["12086"]["HRCN"]["pct"] > payload["by_fips"]["08031"]["HRCN"]["pct"]
+    assert payload["by_fips"]["12086"]["HRCN"]["alrb"] > (payload["by_fips"]["08031"]["HRCN"]["alrb"] or 0)
     assert gaps == []
 
 
@@ -145,9 +145,9 @@ async def test_nri_failure_uses_stale_cache_and_says_so(db):
     now = [datetime(2026, 10, 1, tzinfo=UTC)]
     async with httpx.AsyncClient() as client:
         hazards = HazardService(db, client, load_hubs(), now_fn=lambda: now[0])
-        await hazards.percentiles()
+        await hazards.loss_rates()
         now[0] += timedelta(days=31)  # cache expired → refresh fails → stale data with a note
-        payload, gaps = await hazards.percentiles()
+        payload, gaps = await hazards.loss_rates()
     assert payload["version"] == "December 2025"
     assert gaps and "using data retrieved" in gaps[0]
 
@@ -156,5 +156,5 @@ async def test_nri_failure_uses_stale_cache_and_says_so(db):
 async def test_nri_unavailable_without_cache(db):
     respx.get(nri.URL).mock(return_value=httpx.Response(400, text="down"))
     async with httpx.AsyncClient() as client:
-        payload, gaps = await HazardService(db, client, load_hubs()).percentiles()
+        payload, gaps = await HazardService(db, client, load_hubs()).loss_rates()
     assert payload is None and "National Risk Index unavailable" in gaps[0]

@@ -1,17 +1,18 @@
 """Persistence: async SQLAlchemy 2.0 over SQLite (aiosqlite). See docs/DECISIONS.md D14.
 
 Tables are small and few: cached daily weather + a per-(hub, year) fetch log, a JSON cache
-for the NRI percentiles, per-source status, and conversations for follow-up questions.
+for the NRI loss rates, per-source status, and conversations for follow-up questions.
 """
 
 import asyncio
 import uuid
 from contextlib import asynccontextmanager, nullcontext
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, event, func, select
+from sqlalchemy import (JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, event, func, or_,
+                        select, update)
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
@@ -140,6 +141,15 @@ class WebhookAlert(Base):
     delivery: Mapped[str] = mapped_column(String)
 
 
+class Lease(Base):
+    """A named job that only one API process may run at a time (e.g. the scheduled alert check)."""
+
+    __tablename__ = "leases"
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    holder: Mapped[str] = mapped_column(String)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 def ensure_sqlite_directory(url: str) -> None:
     """Create the parent directory of a SQLite file (a fresh clone has no data/ directory)."""
     parsed = make_url(url)
@@ -153,7 +163,8 @@ class Database:
         ensure_sqlite_directory(url)
         self.engine = create_async_engine(
             url,
-            connect_args={"check_same_thread": False},
+            # timeout: another process holding the write lock (several API workers on one file) → wait, don't fail
+            connect_args={"check_same_thread": False} | ({} if memory else {"timeout": 30}),
             poolclass=StaticPool if memory else None,  # one shared connection keeps an in-memory DB alive
         )
         if not memory:
@@ -183,6 +194,19 @@ class Database:
 
     async def dispose(self) -> None:
         await self.engine.dispose()
+
+    # -- leases ----------------------------------------------------------------------
+    async def try_lease(self, name: str, holder: str, ttl_s: float, now: datetime | None = None) -> bool:
+        """Take or renew lease `name` for `ttl_s` seconds. True if `holder` now has it. One conditional
+        UPDATE decides, so two processes racing for an expired lease cannot both win."""
+        now = now or utcnow()
+        async with self._tx() as s:
+            await s.execute(insert(Lease).values(name=name, holder="", expires_at=datetime.min.replace(tzinfo=UTC))
+                            .on_conflict_do_nothing(index_elements=["name"]))
+            result = await s.execute(
+                update(Lease).where(Lease.name == name, or_(Lease.expires_at <= now, Lease.holder == holder))
+                .values(holder=holder, expires_at=now + timedelta(seconds=ttl_s)))
+            return result.rowcount == 1
 
     # -- accounts --------------------------------------------------------------------
     async def get_account(self, email: str) -> dict | None:
@@ -241,7 +265,7 @@ class Database:
             result = await s.scalars(select(WeatherFetch).where(WeatherFetch.hub_id == hub_id))
             return {f.year: f for f in result}
 
-    # -- cache (payloads read whole, e.g. NRI percentiles) --------------------------
+    # -- cache (payloads read whole, e.g. NRI loss rates) --------------------------
     async def cache_put(self, key: str, source: str, payload: Any, fetched_at: datetime | None = None) -> None:
         async with self._tx() as s:
             await s.merge(CacheEntry(key=key, source=source, fetched_at=fetched_at or utcnow(), payload=payload))

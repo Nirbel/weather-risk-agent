@@ -1,5 +1,8 @@
 """Typed validation of config/hubs.yaml and config/scoring.yaml — written test-first."""
 
+import gzip
+import json
+import math
 from datetime import date
 
 import pytest
@@ -66,6 +69,9 @@ def test_invalid_hubs_are_rejected(mutate, message):
         (lambda d: d["climatology"].update(years=0), "years"),
         (lambda d: d["stats"]["snowfall_days"].update(op="approx"), "op"),
         (lambda d: d.update(unknown_section=1), "unknown_section"),
+        (lambda d: d["nri_anchors"].pop("HRCN"), "nri_anchors lacks HRCN"),
+        (lambda d: d["nri_anchors"]["HRCN"].update(full=1e-9), "full must be above floor"),
+        (lambda d: d["nri_anchors"]["HRCN"].update(floor=0), "floor"),
     ],
 )
 def test_invalid_scoring_is_rejected(mutate, message):
@@ -73,6 +79,22 @@ def test_invalid_scoring_is_rejected(mutate, message):
     mutate(data)
     with pytest.raises(ConfigError, match=message):
         parse_scoring(data)
+
+
+def _nearest_rank(sorted_values: list[float], q: float) -> float:
+    return sorted_values[math.ceil(q * len(sorted_values)) - 1]
+
+
+def test_nri_anchors_are_the_measured_national_quantiles():
+    """D26: per hazard, floor = 10th and full = 99th percentile of the non-zero county loss rates in the
+    recorded NRI (2 significant figures). Pins the anchors to the data, not to a target ranking."""
+    with gzip.open("tests/fixtures/recorded/nri_pages.json.gz", "rt") as f:
+        rows = [feat["attributes"] for page in json.load(f) for feat in page["features"]]
+    assert len(rows) == 3232
+    for code, anchor in load_scoring_config().nri_anchors.items():
+        rates = sorted(r[f"{code}_ALRB"] for r in rows if r.get(f"{code}_ALRB"))
+        assert anchor.floor == float(f"{_nearest_rank(rates, 0.10):.2g}"), code
+        assert anchor.full == float(f"{_nearest_rank(rates, 0.99):.2g}"), code
 
 
 # -- default exposure window: previous N completed calendar years ------------------

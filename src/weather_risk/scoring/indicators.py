@@ -1,6 +1,7 @@
 """Small pure helpers shared by every score: normalization and threshold counting."""
 
 import bisect
+import math
 import operator
 from collections.abc import Sequence
 
@@ -24,6 +25,16 @@ def piecewise(x: float, points: Sequence[Sequence[float]]) -> float:
 def anchor_score(value: float, full_score_at: float) -> float:
     """0 → 0, `full_score_at` → 100, capped (fixed anchors, not min-max — D11)."""
     return piecewise(value, [[0, 0], [full_score_at, 100]])
+
+
+def log_anchor_score(value: float | None, floor: float, full: float) -> float:
+    """Log-scale fixed anchors (D26): `floor` → 0, `full` → 100, linear in log10 between, capped.
+    None (not applicable) and 0 (no loss) score 0."""
+    if not value or value <= floor:
+        return 0.0
+    if value >= full:
+        return 100.0
+    return 100.0 * (math.log10(value) - math.log10(floor)) / (math.log10(full) - math.log10(floor))
 
 
 def exceeds(value: float, op: str, threshold: float) -> bool:

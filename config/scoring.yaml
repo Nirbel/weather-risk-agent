@@ -27,7 +27,7 @@ family_weights:          # overall = weighted mean of family scores; equal by de
 
 lens_weights:            # default evidence weights; renormalized over the lenses a family has
   observed: 0.5          # Open-Meteo ERA5 days above an operational threshold
-  modeled: 0.5           # FEMA NRI building-loss rate, national percentile
+  modeled: 0.5           # FEMA NRI building-loss rate on log-scale anchors (nri_anchors)
 # Winter and heat override this (D20): they disrupt hubs through operations (closures,
 # slow handling, labour safety), not building damage, so NRI's building-loss rate is a
 # weak proxy there and observed weather frequency is the more direct evidence.
@@ -75,6 +75,24 @@ nri_hazard_names:
   HAIL: Hail
   SWND: Strong wind
   HWAV: Heat wave
+
+# Modeled lens (D26): each hazard's expected annual building loss rate (ALRB, share of building
+# value lost per year) is scored on a log scale between two fixed anchors:
+#   score = clamp(100 · (log10(alrb) − log10(floor)) / (log10(full) − log10(floor)), 0, 100)
+# No loss, or hazard not applicable in the county → 0. Anchors were measured once on NRI December 2025
+# (3,232 counties): floor = 10th and full = 99th percentile of the counties with a non-zero rate,
+# 2 significant figures (tests/test_config.py re-derives them from the recorded data).
+nri_anchors:
+  WNTW: {floor: 2.4e-7, full: 4.7e-5}
+  ISTM: {floor: 4.1e-7, full: 3.5e-4}
+  CWAV: {floor: 6.1e-9, full: 9.4e-6}
+  HRCN: {floor: 2.7e-7, full: 3.4e-3}
+  IFLD: {floor: 4.9e-4, full: 3.2e-3}
+  CFLD: {floor: 5.8e-8, full: 1.2e-3}
+  TRND: {floor: 3.1e-6, full: 3.2e-4}
+  HAIL: {floor: 5.0e-7, full: 4.7e-4}
+  SWND: {floor: 2.4e-6, full: 3.2e-4}
+  HWAV: {floor: 2.7e-10, full: 3.2e-6}
 
 robustness:
   perturbation: 0.25     # each weight moved ±25 %, one at a time

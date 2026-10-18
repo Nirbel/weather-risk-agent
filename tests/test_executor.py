@@ -6,7 +6,7 @@ from datetime import date
 import pytest
 
 from conftest import FakeAnalyzer
-from weather_risk.agent.executor import ExecContext, execute
+from weather_risk.agent.executor import ExecContext, _format_indicator, execute
 from weather_risk.agent.schemas import QueryPlan
 
 
@@ -14,7 +14,7 @@ def plan(**overrides) -> QueryPlan:
     base = {
         "intent": "rank", "hubs": None, "region": None, "hazards": None, "metric": None, "top_k": None,
         "time_preset": None, "year": None, "start_date": None, "end_date": None, "weight_overrides": None,
-        "interpretation_notes": [], "clarification_question": None, "out_of_scope_reason": None,
+        "interpretation_notes": [], "clarification_question": None, "out_of_scope_reason": None, "exclude_hubs": None,
     }
     return QueryPlan.model_validate(base | overrides)
 
@@ -83,6 +83,10 @@ async def test_stat_window_error_is_explained_not_raised(ctx):
     b = await execute(plan(intent="stat", hubs=["denver"], metric="snowfall_days", time_preset="specific_year",
                            year=2030), ctx)
     assert b.rows == [] and "no observed data" in b.headline
+    # Bug 06: even an error answer states its window, source and assumptions.
+    assert b.sources == ["open_meteo_archive"] and b.assumptions
+    assert {w["label"] for w in b.windows} >= {"Requested window", "Observed data available"}
+    assert b.windows[1] == {"label": "Observed data available", "start": "1940-01-01", "end": "2026-09-25"}
 
 
 async def test_explain_dallas_orders_hazards_by_contribution(ctx):
@@ -210,3 +214,49 @@ async def test_ranking_on_a_hazard_with_no_evidence_ranks_nobody():
     assert b.headline.startswith("No hub can be ranked") and all(r["rank"] is None for r in b.rows)
     flood = await execute(plan(hazards=["flood"]), ctx)  # other hazards still rank normally
     assert flood.rows[0]["rank"] == 1
+
+
+@pytest.mark.parametrize("alrb, value", [
+    (8.07e-4, "$807 per $1M of building value a year"),  # Miami hurricane: 8.07e-4 × 1,000,000 = 807
+    (1.44e-6, "$1.4 per $1M of building value a year"),
+    (5.63e-8, "$0.056 per $1M of building value a year"),  # Chicago hurricane
+    (4.2e-10, "under $0.01 per $1M of building value a year"),
+    (0.0, "$0 per $1M of building value a year"),
+])
+def test_nri_indicator_shows_the_loss_rate_in_dollars(alrb, value):
+    ind = {"label": "Hurricane building loss", "raw": alrb, "unit": "loss rate", "applicable": True, "score": 84.6}
+    assert _format_indicator(ind) == f"Hurricane building loss: {value} → 85 pts"
+
+
+def test_nri_indicator_not_applicable():
+    ind = {"label": "Hurricane building loss", "raw": None, "unit": "loss rate", "applicable": False, "score": 0.0}
+    assert _format_indicator(ind) == "Hurricane building loss: not applicable (0) → 0 pts"
+
+
+async def test_rank_all_hubs_except_one(ctx):
+    full = await execute(plan(), ctx)
+    b = await execute(plan(exclude_hubs=["miami"]), ctx)
+    assert len(b.rows) == 9 and "Miami" not in [r["hub"] for r in b.rows]
+    assert "except Miami" in b.details["scope"] and "except Miami" in b.headline
+    scores = {r["hub"]: r["score"] for r in full.rows}
+    assert all(r["score"] == scores[r["hub"]] for r in b.rows)  # excluding a hub only moves ranks
+
+
+async def test_rank_a_region_except_one(ctx):
+    b = await execute(plan(region="midwest", hazards=["winter"], exclude_hubs=["detroit"]), ctx)
+    assert [r["hub"] for r in b.rows] == ["Minneapolis–St Paul", "Chicago", "Kansas City"]
+
+
+async def test_excluding_every_hub_of_a_region_is_explained(ctx):
+    b = await execute(plan(region="west", exclude_hubs=["denver"]), ctx)
+    assert b.rows == [] and "no hubs left" in b.headline.lower()
+
+
+async def test_empty_scope_keeps_hub_names_capitalized(ctx):
+    b = await execute(plan(region="west", exclude_hubs=["denver"]), ctx)
+    assert "except Denver" in b.uncertainty[0][1] and "US Census" in b.uncertainty[0][1]
+
+
+async def test_excluding_a_hub_outside_the_region_is_not_mentioned(ctx):
+    b = await execute(plan(region="midwest", exclude_hubs=["miami"]), ctx)
+    assert "Miami" not in b.details["scope"] and len(b.rows) == 4

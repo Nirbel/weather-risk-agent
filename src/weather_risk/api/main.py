@@ -6,10 +6,10 @@
 import asyncio
 import contextlib
 import logging
-import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from weather_risk.agent import llm
@@ -17,8 +17,8 @@ from weather_risk.agent.schemas import AgentAnswer, QueryPlan
 from weather_risk.agent.service import Agent, ConversationAccessError
 from weather_risk.alerts import AlertService, run_on_schedule
 from weather_risk.analysis import build_analyzer
-from weather_risk.api.auth import (MAX_PASSWORD, User, current_user, ensure_demo_admin, login, require_admin,
-                                   require_admin_or_trigger_secret, signup)
+from weather_risk.api.auth import (MAX_PASSWORD, User, current_user, ensure_demo_admin, generated_jwt_secret, login,
+                                   require_admin, require_admin_or_trigger_secret, signup, signup_domain)
 from weather_risk.config import load_hubs, load_scoring_config, validate_config
 from weather_risk.db import Database
 from weather_risk.scoring.exposure import overall_score
@@ -62,7 +62,7 @@ def _explain_plan(hub_id: str) -> QueryPlan:
     return QueryPlan.model_validate({
         "intent": "explain", "hubs": [hub_id], "region": None, "hazards": None, "metric": None, "top_k": None,
         "time_preset": None, "year": None, "start_date": None, "end_date": None, "weight_overrides": None,
-        "interpretation_notes": [], "clarification_question": None, "out_of_scope_reason": None,
+        "interpretation_notes": [], "clarification_question": None, "out_of_scope_reason": None, "exclude_hubs": None,
     })
 
 
@@ -76,9 +76,11 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
         validate_config()  # fail fast on a bad hubs.yaml / scoring.yaml
         app.state.settings = settings or get_settings()
         if len((app.state.settings.jwt_secret or "").encode()) < 32:
-            log.warning("JWT_SECRET is unset or shorter than 32 bytes — using a random one; "
-                        "users log in again after a restart.")
-            app.state.settings = app.state.settings.model_copy(update={"jwt_secret": secrets.token_urlsafe(32)})
+            secret_file = app.state.settings.jwt_secret_file
+            log.warning("JWT_SECRET is unset or shorter than 32 bytes — using a generated one (%s).",
+                        f"saved in {secret_file}" if secret_file else "users log in again after a restart")
+            app.state.settings = app.state.settings.model_copy(
+                update={"jwt_secret": generated_jwt_secret(secret_file)})
         app.state.db = db or Database(app.state.settings.database_url)
         await app.state.db.create_all()
         await ensure_demo_admin(app.state.db, app.state.settings)
@@ -86,7 +88,8 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
             log.warning("The demo admin %s uses the default password from the task — set DEMO_ADMIN_PASSWORD "
                         "before exposing this server to others.", app.state.settings.demo_admin_email)
         client = make_client(app.state.settings.contact_email)
-        app.state.analyzer = analyzer or build_analyzer(app.state.db, client)
+        app.state.analyzer = analyzer or build_analyzer(
+            app.state.db, client, calls_per_minute=app.state.settings.open_meteo_calls_per_minute)
         app.state.agent = Agent(app.state.db, app.state.analyzer, app.state.settings, completion=completion)
         app.state.alerts = AlertService(app.state.db, app.state.analyzer, app.state.settings, client,
                                         **({"resolve": resolve} if resolve else {}))
@@ -101,7 +104,10 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
         await client.aclose()
         await app.state.db.dispose()
 
-    app = FastAPI(title="Weather Risk Intelligence Agent", version="0.2.0", lifespan=lifespan,
+    # Behind a proxy that serves the API under a prefix (ROOT_PATH=/api), the docs must fetch
+    # /api/openapi.json and "Try it out" must call /api/…; root_path tells FastAPI the public prefix.
+    root_path = (settings or get_settings()).root_path.rstrip("/")
+    app = FastAPI(title="Weather Risk Intelligence Agent", version="0.2.0", lifespan=lifespan, root_path=root_path,
                   description="Ranks, compares and explains the weather-disruption exposure of US logistics hubs.")
 
     # -- auth --------------------------------------------------------------------------
@@ -112,17 +118,26 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
 
     @app.post("/auth/signup", response_model=LoginResponse, status_code=201, tags=["auth"])
     async def auth_signup(body: SignupRequest, request: Request):
-        """Create an analyst account (@moveo.co.il only) and log in."""
+        """Create an analyst account (only for the SIGNUP_DOMAIN email domain) and log in."""
         user, token = await signup(request.app.state.db, body.email, body.password, request.app.state.settings)
         return LoginResponse(token=token, email=user.email, role=user.role)
 
     # -- agent -------------------------------------------------------------------------
-    @app.post("/chat", response_model=AgentAnswer, tags=["agent"])
+    @app.post("/chat", response_model=AgentAnswer, tags=["agent"], responses={
+        422: {"model": AgentAnswer, "description": "The query plan was still invalid after one retry (intent=error)"},
+        503: {"model": AgentAnswer, "description": "Every LLM provider is unavailable (intent=error); see Retry-After"},
+    })
     async def chat(body: ChatRequest, request: Request, user: User = Depends(current_user)):
+        """Ask a question. Failures still return an AgentAnswer (stored in the conversation), with 422 or 503."""
         try:
-            return await request.app.state.agent.ask(body.message, body.conversation_id, user.email)
+            answer = await request.app.state.agent.ask(body.message, body.conversation_id, user.email)
         except ConversationAccessError as exc:
             raise HTTPException(404, "Conversation not found") from exc
+        if answer.intent != "error":
+            return answer
+        unavailable = answer.meta.get("error_kind") == "llm_unavailable"
+        return JSONResponse(answer.model_dump(mode="json"), status_code=503 if unavailable else 422,
+                            headers={"Retry-After": "60"} if unavailable else None)
 
     @app.post("/transcribe", tags=["agent"])
     async def transcribe(audio: UploadFile, request: Request, user: User = Depends(current_user)):
@@ -160,6 +175,15 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
     @app.get("/hubs", tags=["data"])
     def hubs(user: User = Depends(current_user)):
         return [h.model_dump() for h in load_hubs()]
+
+    @app.get("/scoring/config", tags=["data"])
+    def scoring_config(user: User = Depends(current_user)):
+        """Thresholds, anchors and weights from config/scoring.yaml — what the 'How scoring works' page shows."""
+        cfg = load_scoring_config()
+        return cfg.model_dump(mode="json") | {
+            "lens_weights_by_family": {f: cfg.lens_weights_for(f).model_dump() for f in cfg.families},
+            "robustness_scenarios": 2 * (len(cfg.families) + len(cfg.lens_weights.model_dump())),
+        }
 
     @app.get("/analytics/exposure", tags=["analytics"])
     async def analytics_exposure(request: Request, user: User = Depends(current_user)):
@@ -255,6 +279,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None, 
             "llm_models": [st.settings.llm_model, st.settings.llm_fallback_model],
             "exposure_window": {"start": start.isoformat(), "end": end.isoformat()},
             "hubs": len(load_hubs()),
+            "signup_domain": signup_domain(st.settings),
             "sources": await st.db.source_statuses(),
         }
 

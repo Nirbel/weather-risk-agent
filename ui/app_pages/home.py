@@ -44,10 +44,12 @@ with left:
             "- Two kinds of evidence per hazard:\n"
             "  - **Observed weather**: days per year above an operational threshold (e.g. snowfall ≥ 2.5 cm), "
             "scored on fixed anchors.\n"
-            "  - **Modeled loss**: the county's FEMA NRI building-loss rate, as a percentile of all US counties.\n"
+            "  - **Modeled loss**: the county's FEMA NRI building-loss rate, scored on fixed log-scale anchors.\n"
             "- **Overall** = equal-weight average of the 5 hazard families. You can ask to re-weight.\n"
             "- Rankings report near-ties and whether the order survives ±25 % weight changes."
         )
+        if st.button("How scoring works, step by step", icon=":material/calculate:", type="tertiary"):
+            st.switch_page(st.session_state.pages["scoring"])
     with st.container(border=True):
         st.subheader(":material/database: Data sources", anchor=False)
         st.markdown(
