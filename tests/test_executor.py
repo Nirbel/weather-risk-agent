@@ -250,3 +250,13 @@ async def test_rank_a_region_except_one(ctx):
 async def test_excluding_every_hub_of_a_region_is_explained(ctx):
     b = await execute(plan(region="west", exclude_hubs=["denver"]), ctx)
     assert b.rows == [] and "no hubs left" in b.headline.lower()
+
+
+async def test_empty_scope_keeps_hub_names_capitalized(ctx):
+    b = await execute(plan(region="west", exclude_hubs=["denver"]), ctx)
+    assert "except Denver" in b.uncertainty[0][1] and "US Census" in b.uncertainty[0][1]
+
+
+async def test_excluding_a_hub_outside_the_region_is_not_mentioned(ctx):
+    b = await execute(plan(region="midwest", exclude_hubs=["miami"]), ctx)
+    assert "Miami" not in b.details["scope"] and len(b.rows) == 4

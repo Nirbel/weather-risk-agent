@@ -140,3 +140,10 @@ async def test_hebrew_question_gets_a_hebrew_explanation_or_the_hebrew_template(
                          "suggested_follow_ups": []})
     explanation, _, source = await explain(question, b, Settings(), completion=FakeCompletion(hebrew))
     assert source == "llm" and HEBREW.search(explanation.summary)
+
+
+def test_hebrew_forecast_follow_ups_are_recognised():
+    from weather_risk.agent.explainer import UNANSWERABLE
+    for q in ("מה התחזית ל-Denver?", "האם ירד שלג בשבוע הבא?", "מה צפוי מחר ב-Chicago?"):
+        assert UNANSWERABLE.search(q), q
+    assert not UNANSWERABLE.search("השווה בין Miami ל-Houston בחשיפה להוריקנים")

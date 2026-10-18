@@ -186,3 +186,26 @@ def test_false_ranking_claims_are_flagged(text):
 ])
 def test_true_or_non_ranking_statements_pass(text):
     assert rank_claim_errors(text, ORDERS, HUB_NAMES) == []
+
+
+# Hebrew narratives (the LLM keeps hub names in English, often glued to a Hebrew prefix: "בDenver").
+@pytest.mark.parametrize("text", [
+    "Denver הוא המרכז החשוף ביותר.",
+    "בDenver הציון הגבוה ביותר מבין המרכזים.",
+    "Houston במקום האחרון.",
+    "Denver מדורג ראשון בחורף.",
+    "ל-Denver ציון כולל של 32.0 (דירוג 2 מתוך 5).",
+])
+def test_false_hebrew_ranking_claims_are_flagged(text):
+    assert rank_claim_errors(text, ORDERS, HUB_NAMES)
+
+
+@pytest.mark.parametrize("text", [
+    "Houston מדורג ראשון בחשיפה הכוללת.",
+    "Minneapolis מדורג ראשון בחורף.",
+    "הסיכון הגבוה ביותר של Denver הוא חורף.",     # Denver's own top hazard, not a ranking of hubs
+    "ל-Denver ציון כולל של 32.0 (דירוג 5 מתוך 5).",
+    "Denver הוא הכי פחות חשוף.",
+])
+def test_true_hebrew_statements_pass(text):
+    assert rank_claim_errors(text, ORDERS, HUB_NAMES) == []

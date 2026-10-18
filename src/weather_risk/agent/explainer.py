@@ -18,7 +18,8 @@ from weather_risk.settings import Settings
 PROMPT = (Path(__file__).parent / "prompts" / "explainer.md").read_text()
 # Follow-ups the planner would route to out_of_scope: suggesting them sends the user into a refusal.
 UNANSWERABLE = re.compile(r"\b(forecast\w*|outlook|tomorrow|upcoming|next (?:week|month|\d+ days)|7-day|"
-                          r"this (?:week|weekend)|will it)\b", re.IGNORECASE)
+                          r"this (?:week|weekend)|will it)\b"
+                          r"|תחזי|מחר|בשבוע הבא|בחודש הבא|בימים הקרובים|השבוע", re.IGNORECASE)
 
 
 def build_messages(question: str, bundle: ResultBundle, previous_question: str | None = None) -> list[dict]:

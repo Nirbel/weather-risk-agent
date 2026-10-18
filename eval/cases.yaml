@@ -215,7 +215,8 @@
   turns:
     - question: Why is Denver the most exposed hub?   # false premise: Denver ranks 7th of 10 overall
       expect_plan: {intent: explain, hubs: [denver]}
-  checks: {contract: true, headline_contains: ["rank 7 of 10"], not_contains: [highest, "most exposed"]}
+  checks: {contract: true, headline_contains: ["rank 7 of 10"],
+           not_contains: ["Denver is the most exposed", "Denver has the highest", "the highest among hubs"]}
 
 - id: F7
   group: Guardrails

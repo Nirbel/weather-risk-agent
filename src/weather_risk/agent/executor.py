@@ -102,7 +102,8 @@ def _select_hubs(plan: QueryPlan, ctx: ExecContext) -> tuple[list[str], str]:
     if plan.hubs:
         return list(plan.hubs), ctx.tr("the selected hubs", "המרכזים שנבחרו")
     excluded = [h for h in plan.exclude_hubs or [] if h in ctx.hubs]
-    if plan.region:
+    if plan.region:  # only exclusions inside the region change it (and are worth mentioning)
+        excluded = [h for h in excluded if ctx.hubs[h].region == plan.region]
         hub_ids = [h for h, hub in ctx.hubs.items() if hub.region == plan.region and h not in excluded]
         region = region_name(plan.region, ctx.lang, REGION_NAMES[plan.region])
         scope = ctx.tr(f"{region} hubs (US Census region)", f"מרכזי {region} (אזור מפקד האוכלוסין של ארה״ב)")
@@ -324,7 +325,7 @@ async def _rank(plan: QueryPlan, ctx: ExecContext) -> ResultBundle:
         return ResultBundle("rank", ctx.tr(f"There are no hubs left to rank: {scope} is empty.",
                                            f"לא נשארו מרכזים לדירוג: {scope} — הרשימה ריקה."),
                             details={"scope": scope},
-                            uncertainty=[("high", ctx.tr(f"{scope.capitalize()} has no hubs.", f"{scope}: אין מרכזים."))],
+                            uncertainty=[("high", ctx.tr(f"{scope[0].upper()}{scope[1:]} has no hubs.", f"{scope}: אין מרכזים."))],
                             follow_ups=[ctx.tr("Rank all hubs by overall weather exposure.",
                                                "דרג את כל המרכזים לפי החשיפה הכוללת למזג האוויר.")])
     families = _families(plan, ctx)
