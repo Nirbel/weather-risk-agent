@@ -4,20 +4,20 @@ A chat agent that ranks, compares and explains how exposed 10 US logistics hubs 
 so analysts can choose which hubs to invest in.
 
 - **Numbers come from code, not the LLM.** The LLM turns a question into a schema-validated query plan and
-  explains the computed result; a grounding check rejects any number it invents.
+  explains the computed result. A grounding check rejects any number or ranking claim it gets wrong.
 - **Every answer states** its assumptions, uncertainty, data sources and time window.
 - **Real public data, fetched on demand:** Open-Meteo ERA5 daily weather (previous 5 completed years) and
   the FEMA National Risk Index. Incomplete data is never ranked as if it were complete.
-- **Bonuses:** score-change alerts to your own webhook, and voice questions.
-
+- **Ask in English or Hebrew.** A Hebrew question gets a Hebrew answer. You can also ask by voice.
+- **Score-change alerts** to your own webhook (Slack, n8n, Zapier or any JSON endpoint).
+- **A transparent score:** the *How scoring works* page shows every formula, threshold and weight, with a
+  worked example for any hub.
 
 **Live demo:** [https://weather-risk.duckdns.org](https://weather-risk.duckdns.org)
 
-
-
-**Documentation:** [Architecture](docs/ARCHITECTURE.md) (components, repo structure, storage) ·
-[Decisions](docs/DECISIONS.md) · [Plan](docs/PLAN.md) · [Task](docs/TASK.md) ·
-[AI session](docs/AI_SESSION.md) (how it was built with Claude Code; transcript in [docs/session/](docs/session/))
+**Docs:** [Architecture](docs/ARCHITECTURE.md) (components, repo structure, storage) ·
+[Design decisions](docs/DECISIONS.md) (why each choice was made) ·
+[Build log](docs/AI_SESSION.md) (how it was built with Claude Code)
 
 ## Run it
 
@@ -53,7 +53,7 @@ uv run python scripts/run.py
 | UI (Home · Chat · Analytics · How scoring works · Alerts) | http://localhost:8501 |
 | API and interactive docs | http://localhost:8000/docs |
 
-**Log in** with the demo admin **`admin@example.co.il`** / **`12345678`**, or use *Sign up* with any
+**Log in** with the default admin **`admin@example.co.il`** / **`12345678`**, or use *Sign up* with any
 `@example.co.il` address (new accounts are analysts). Set `SIGNUP_DOMAIN` to use your own domain.
 
 **How the score works:** the *How scoring works* page explains the strategy, the formulas and every
@@ -78,7 +78,7 @@ score breakdown). The Analytics page charts the same numbers.
 
 | Who | How | Can |
 |---|---|---|
-| Demo admin | `admin@example.co.il` / `12345678` (created on first start) | Everything, plus *Check now* on the Alerts page |
+| Admin | `admin@example.co.il` / `12345678` (created on first start) | Everything, plus *Check now* on the Alerts page |
 | Analyst | *Sign up* with an `@example.co.il` email (password ≥ 8 characters) | Chat, Analytics, their own alerts |
 
 - Passwords are stored as salted scrypt hashes.
@@ -87,7 +87,7 @@ score breakdown). The Analytics page charts the same numbers.
 - **Before you expose the app to others,** set `DEMO_ADMIN_PASSWORD` in `.env`; changing it and restarting
   rotates the password.
 
-## Alerts and voice (bonuses)
+## Alerts and voice
 
 - **Score-change alerts.** On the **Alerts** page each user sets their own webhook: URL, on/off, threshold,
   *Save*, *Test webhook*.
@@ -120,7 +120,7 @@ Unit and integration tests; every external call is mocked or replayed (no keys, 
 uv run python -m eval.run
 ```
 
-22 eval cases, **offline**: recorded real API responses, expected plans, deterministic explanations.
+28 eval cases, **offline**: recorded real API responses, expected plans, deterministic explanations.
 Fast and reproducible; no keys or network.
 
 ```bash
@@ -183,7 +183,7 @@ uv run python -m weather_risk.agent "Why is the Dallas hub's weather disruption 
 uv run python -m weather_risk.warm
 ```
 
-`weather_risk.warm` fills the cache before a demo and prints the exposure table. Add `--replay` to use the
+`weather_risk.warm` fills the cache ahead of time and prints the exposure table. Add `--replay` to use the
 recorded data with no network.
 
 ## Configuration
@@ -195,7 +195,7 @@ recorded data with no network.
 | `GROQ_API_KEY` / `GEMINI_API_KEY` | LLM keys (at least one) |
 | `LLM_MODEL` / `LLM_FALLBACK_MODEL` | Default `groq/openai/gpt-oss-20b` → `gemini/gemini-3.8-flash` |
 | `SIGNUP_DOMAIN` | The only email domain that may sign up, default `example.co.il` |
-| `DEMO_ADMIN_EMAIL` / `DEMO_ADMIN_PASSWORD` | Demo admin, default `admin@example.co.il` / `12345678` |
+| `DEMO_ADMIN_EMAIL` / `DEMO_ADMIN_PASSWORD` | The admin account created on first start, default `admin@example.co.il` / `12345678` |
 | `JWT_SECRET` | Signs login tokens; empty → a generated one, saved in `data/.jwt_secret` so logins survive restarts |
 | `ALERT_THRESHOLD` / `ALERT_CHECK_HOURS` | Default alert threshold (5 points) and check interval (24 h) |
 | `ALLOW_PRIVATE_WEBHOOKS` | `true` lets users target private or loopback hosts (default `false`) |
